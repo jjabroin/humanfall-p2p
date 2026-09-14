@@ -69,7 +69,7 @@ export function createHumanMesh({ suit = '#ff8c42', skin = '#ffd9b3' } = {}) {
 
   // 이름표 스프라이트
   const label = makeLabel('');
-  label.position.y = 2.05;
+  label.sprite.position.y = 2.05;
   root.add(label.sprite);
   const setName = (t) => { label.set(t); };
 
