@@ -1,0 +1,22 @@
+{
+  "name": "humanfall-p2p",
+  "version": "0.1.0",
+  "description": "Human Fall Flat style wobbly 3D party game with P2P multiplayer (Three.js + Trystero)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "@trystero-p2p/torrent": "^0.25.4",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  },
+  "private": true,
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}

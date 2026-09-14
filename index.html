@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Humanfall P2P — 말랑말랑 P2P 파티 게임</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b1020; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; -webkit-font-smoothing: antialiased; }
+  #game { display: block; width: 100%; height: 100%; touch-action: none; }
+  #ui { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+  .panel { pointer-events: auto; }
+  #menu {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, rgba(20,30,60,.55), rgba(5,8,18,.88));
+    pointer-events: auto;
+  }
+  #menu.hidden { display: none; }
+  .card {
+    background: rgba(16,22,44,.92); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 16px; padding: 28px 32px; width: min(420px, 90vw);
+    box-shadow: 0 20px 60px rgba(0,0,0,.5); color: #eef2ff; text-align: center;
+  }
+  .card h1 { font-size: 26px; margin-bottom: 4px; }
+  .card p.sub { opacity: .7; font-size: 13px; margin-bottom: 16px; }
+  .card input {
+    width: 100%; padding: 10px 12px; margin: 6px 0; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.06);
+    color: #fff; font-size: 15px; outline: none;
+  }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row button { flex: 1; }
+  button {
+    padding: 11px 14px; border-radius: 10px; border: none; font-size: 15px; font-weight: 700;
+    cursor: pointer; background: #4f7cff; color: #fff;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.ghost { background: rgba(255,255,255,.12); }
+  button.green { background: #22b573; }
+  .help { margin-top: 14px; font-size: 12px; line-height: 1.7; opacity: .75; text-align: left; }
+  #hud { position: absolute; inset: 0; display: none; }
+  #hud.visible { display: block; }
+  #topbar {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 8px; align-items: center; pointer-events: auto;
+  }
+  .pill {
+    background: rgba(10,14,30,.72); border: 1px solid rgba(255,255,255,.14); color: #fff;
+    border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer; user-select: none;
+  }
+  .pill b { color: #ffd75e; letter-spacing: 2px; }
+  #players {
+    position: absolute; top: 12px; left: 12px; color: #fff; font-size: 13px;
+    background: rgba(10,14,30,.72); border: 1px solid rgba(255,255,255,.14);
+    border-radius: 12px; padding: 10px 12px; line-height: 1.8; min-width: 130px;
+  }
+  #hint {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    color: #fff; font-size: 12.5px; background: rgba(10,14,30,.66);
+    padding: 8px 16px; border-radius: 999px; white-space: nowrap;
+    border: 1px solid rgba(255,255,255,.12);
+  }
+  #grabTip {
+    position: absolute; bottom: 56px; left: 50%; transform: translateX(-50%);
+    color: #ffd75e; font-size: 14px; font-weight: 700; display: none;
+    text-shadow: 0 2px 8px rgba(0,0,0,.7);
+  }
+  #toast {
+    position: absolute; top: 70px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
+  }
+  .toast {
+    background: rgba(20,28,58,.92); border: 1px solid rgba(255,255,255,.2); color: #fff;
+    padding: 10px 20px; border-radius: 12px; font-size: 15px; font-weight: 700;
+    animation: pop .25s ease-out;
+  }
+  @keyframes pop { from { transform: scale(.85); opacity: 0; } }
+  #lockTip {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    color: #fff; font-size: 18px; font-weight: 700; text-shadow: 0 2px 12px #000;
+    background: rgba(0,0,0,.35); pointer-events: auto; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="ui">
+    <div id="menu">
+      <div class="card panel">
+        <h1>🍮 Humanfall P2P</h1>
+        <p class="sub">말랑말랑 휴먼이 되어 친구와 함께 골인 지점을 노려보세요!<br/>서버 없이 방 코드로 바로 연결됩니다.</p>
+        <input id="nick" maxlength="12" placeholder="닉네임 (예: 말랑이)" />
+        <input id="code" maxlength="6" placeholder="방 코드 6자리 (참가할 때만)" style="text-transform:uppercase" />
+        <div class="row">
+          <button id="btnCreate" class="green">새 방 만들기</button>
+          <button id="btnJoin">참가하기</button>
+        </div>
+        <div class="row">
+          <button id="btnSolo" class="ghost">혼자 놀기</button>
+        </div>
+        <div class="help">
+          ⌨️ <b>WASD</b> 이동 · <b>Space</b> 점프 · <b>Shift</b> 달리기<br/>
+          🖱️ <b>좌클릭/우클릭</b> 왼손/오른손 잡기 · <b>마우스</b> 시점 · <b>휠</b> 줌<br/>
+          📦 박스를 잡고 던지고, 친구를 붙잡고, 빛나는 <b>골인 링</b>에 들어가세요!
+        </div>
+      </div>
+    </div>
+    <div id="hud">
+      <div id="topbar"><div class="pill" id="roomPill" title="클릭하면 복사">방 코드 <b id="roomCode">------</b> 📋</div></div>
+      <div id="players"></div>
+      <div id="toast"></div>
+      <div id="grabTip">🤏 잡았다! 놓으려면 클릭 해제</div>
+      <div id="hint">WASD 이동 · Space 점프 · 좌/우클릭 잡기 · 골인 링으로!</div>
+    </div>
+    <div id="lockTip">🖱️ 클릭해서 마우스 잠그기</div>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
