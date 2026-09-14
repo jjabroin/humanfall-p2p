@@ -81,7 +81,19 @@ export class Input {
     addEventListener('blur', () => this.releaseAll());
     addEventListener('gamepadconnected', (e) => { this.#pad = e.gamepad.index; });
     addEventListener('gamepaddisconnected', () => { this.#pad = null; });
+    // 방향 전환/리사이즈 때 손가락 좌표계가 바뀌므로 터치 상태 초기화 (조이스틱 어긋남 방지)
+    addEventListener('orientationchange', () => setTimeout(() => this.#resetTouch(), 50));
+    addEventListener('resize', () => this.#resetTouch());
     this.#initTouch();
+  }
+
+  #resetTouch() {
+    if (this.#stickId === null && this.#lookId === null) return;
+    this.#stickId = null; this.#lookId = null;
+    this.move.set(0, 0);
+    this.setAction?.('sprint', false);
+    const stickEl = document.getElementById('stick');
+    if (stickEl) stickEl.style.display = 'none';
   }
 
   // ---- 터치: 왼쪽 가상 조이스틱 + 오른쪽 드래그 시점 + 버튼 ----

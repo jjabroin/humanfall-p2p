@@ -24,10 +24,14 @@ export class Engine {
     this.canvas = canvas;
     this.events = new EventBus();
     this.input = new Input();
+    // 모바일(터치) 기기는 픽셀비를 낮게 시작 + 그림자 축소 (발열/프레임対策)
+    this.mobile = matchMedia('(pointer: coarse)').matches;
+    this.prCap = this.mobile ? 1.5 : 2;
+    this.pr = Math.min(devicePixelRatio || 1, this.prCap);
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    this.renderer.setPixelRatio(this.pr);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -38,6 +42,7 @@ export class Engine {
       camera: this.camera,
       renderer: this.renderer,
       canvas,
+      mobile: this.mobile,
       clock: this.clock,
       input: this.input,
       events: this.events,
@@ -103,8 +108,27 @@ export class Engine {
       const s = this.systems.get(key);
       if (s?.update) s.update(dt, this.ctx);
     }
+    this.#autoTune(dt);
     this.renderer.render(this.scene, this.camera);
     this.input.endFrame();
+  }
+
+  #perfAcc = 0; #perfN = 0;
+  // 자동 품질 조절: 평균 fps가 낮으면 픽셀비를 내리고, 여유로우면 올림.
+  #autoTune(dt) {
+    this.#perfAcc += dt; this.#perfN++;
+    if (this.#perfN < 150) return;
+    const avg = this.#perfAcc / this.#perfN;
+    this.#perfAcc = 0; this.#perfN = 0;
+    if (avg > 1 / 42 && this.pr > 1) {
+      this.pr = Math.max(1, this.pr - 0.25);
+      this.renderer.setPixelRatio(this.pr);
+      this.#resize();
+    } else if (avg < 1 / 57 && this.pr < this.prCap) {
+      this.pr = Math.min(this.prCap, this.pr + 0.25);
+      this.renderer.setPixelRatio(this.pr);
+      this.#resize();
+    }
   }
 
   #resize() {

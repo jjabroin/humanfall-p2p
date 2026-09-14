@@ -35,7 +35,8 @@ export class WorldSystem {
     const sun = new THREE.DirectionalLight('#fff4e0', 2.0);
     sun.position.set(18, 30, 12);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    const shadowSize = ctx.mobile ? 1024 : 2048;
+    sun.shadow.mapSize.set(shadowSize, shadowSize);
     sun.shadow.camera.left = -40; sun.shadow.camera.right = 40;
     sun.shadow.camera.top = 60; sun.shadow.camera.bottom = -20;
     sun.shadow.camera.far = 100;
