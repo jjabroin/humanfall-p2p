@@ -8,7 +8,7 @@ export class UISystem {
     this.menu = $('menu'); this.hud = $('hud');
     this.roomCode = $('roomCode'); this.players = $('players');
     this.toastBox = $('toast'); this.grabTip = $('grabTip');
-    this.lockTip = $('lockTip');
+    this.lockTip = $('lockTip'); this.goalPill = $('goalPill');
 
     const nick = $('nick'), code = $('code');
     nick.value = localStorage.getItem('hfall_nick') ?? '';
@@ -16,13 +16,12 @@ export class UISystem {
     if (savedCode) code.value = savedCode;
 
     $('btnCreate').onclick = () => {
-      const c = genCode();
-      this.#join(c, nick.value || '말랑이');
+      this.#join(genCode(), nick.value || '말랑이', true);
     };
     $('btnJoin').onclick = () => {
       const c = (code.value || '').trim().toUpperCase();
       if (c.length < 4) { this.toast('방 코드를 4~6자로 입력하세요!'); return; }
-      this.#join(c, nick.value || '말랑이');
+      this.#join(c, nick.value || '말랑이', false);
     };
     $('btnSolo').onclick = () => {
       const human = ctx.get('human');
@@ -44,10 +43,10 @@ export class UISystem {
     ctx.events.on(EV.GOAL, ({ name, self }) => {
       this.toast(self ? `🏆 ${name} 골인!! 다시 시작 지점으로~` : `🏆 ${name}님이 골인!`);
     });
-    ctx.events.on(EV.PEER_JOIN, ({ name }) => this.toast(`👋 ${name} 참가!`));
+    ctx.events.on(EV.PEER_JOIN, ({ name }) => this.toast(`👋 ${name} 참가! 연결됨 ✅`));
     ctx.events.on(EV.PEER_LEAVE, ({ name }) => this.toast(`🚪 ${name} 퇴장`));
     ctx.events.on('input:pointerlock', (locked) => {
-      this.lockTip.style.display = (!locked && this.inGame) ? 'flex' : 'none';
+      this.lockTip.style.display = (!locked && this.inGame && !ctx.input.isTouch) ? 'flex' : 'none';
     });
     addEventListener('keydown', (e) => {
       if (e.code === 'Escape' && this.inGame) {
@@ -56,17 +55,19 @@ export class UISystem {
     });
   }
 
-  #join(code, name) {
+  #join(code, name, isCreate) {
     const net = this.ctx.get('net');
     localStorage.setItem('hfall_nick', name);
     localStorage.setItem('hfall_code', code);
     try {
       net.connect(code, name);
       this.#enter(code);
-      this.toast(`방 ${code} 연결 중... 같은 코드를 친구에게 알려주세요!`);
+      this.toast(isCreate
+        ? `🎉 방 ${code} 생성! 친구에게 코드를 공유하세요 📤`
+        : `🚪 방 ${code} 입장! 친구를 기다리는 중...`);
     } catch (err) {
       console.error(err);
-      this.toast('연결 실패 😢 혼자 놀기로 시작합니다');
+      this.toast('이 브라우저는 P2P를 지원하지 않아 혼자 놀기로 시작합니다 😢');
       this.#enter(null);
     }
   }
@@ -76,7 +77,11 @@ export class UISystem {
     this.menu.classList.add('hidden');
     this.hud.classList.add('visible');
     this.roomCode.textContent = code ?? 'SOLO';
-    this.ctx.canvas.requestPointerLock?.();
+    if (this.ctx.input.isTouch) {
+      document.getElementById('hint').textContent = '왼쪽 스틱 이동(끝까지=달리기) · 오른쪽 드래그 시점 · 🤏 잡기 · ⬆️ 점프';
+    } else {
+      this.ctx.canvas.requestPointerLock?.();
+    }
   }
 
   toast(msg) {
@@ -89,6 +94,7 @@ export class UISystem {
   }
 
   #acc = 0;
+  #goalAcc = 0;
   update(dt, ctx) {
     if (!this.inGame) return;
     const net = ctx.get('net'), human = ctx.get('human');
@@ -98,7 +104,14 @@ export class UISystem {
       this.#acc = 0;
       const rows = [`🙂 <b>${escapeHtml(human.nickname)}</b> (나) 🏆${human.wins}`];
       for (const r of net.remotes()) rows.push(`🙂 ${escapeHtml(r.name)}`);
-      this.players.innerHTML = `👥 ${net.playerCount()}명<br/>` + rows.join('<br/>');
+      const waiting = net.online && net.peers.size === 0 ? '<br/>📡 친구 접속 대기 중...' : '';
+      this.players.innerHTML = `👥 ${net.playerCount()}명<br/>` + rows.join('<br/>') + waiting;
+    }
+    this.#goalAcc = (this.#goalAcc ?? 0) + dt;
+    if (this.#goalAcc > 0.25) {
+      this.#goalAcc = 0;
+      const d = human.pos.distanceTo(ctx.get('world').goal);
+      this.goalPill.textContent = d < 3 ? '🥅 거의 다 왔다!' : `🥅 ${Math.round(d)}m`;
     }
   }
 }

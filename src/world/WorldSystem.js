@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Config } from '../core/Config.js';
+import { EV } from '../core/events.js';
 
 // 떠있는 섬 레벨 + 잡기/밀기 가능한 프롭 + 골인 링.
 // 물리는 커스텀 경량 물리 (stickfight처럼 외부 물리엔진 없음).
@@ -13,8 +14,22 @@ export class WorldSystem {
   async init(ctx) {
     this.ctx = ctx;
     const scene = ctx.scene;
-    scene.background = new THREE.Color('#87b5e8');
-    scene.fog = new THREE.Fog('#87b5e8', 40, 140);
+    scene.fog = new THREE.Fog('#bcd8f0', 45, 150);
+
+    // 그라데이션 스카이돔
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(400, 16, 12),
+      new THREE.ShaderMaterial({
+        side: THREE.BackSide, depthWrite: false, fog: false,
+        uniforms: {
+          top: { value: new THREE.Color('#3d7ac8') },
+          bottom: { value: new THREE.Color('#d8ecff') },
+        },
+        vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+        fragmentShader: 'uniform vec3 top; uniform vec3 bottom; varying vec3 vP; void main(){ float h = normalize(vP).y * 0.5 + 0.5; gl_FragColor = vec4(mix(bottom, top, smoothstep(0.45, 0.75, h)), 1.0); }',
+      })
+    );
+    scene.add(sky);
 
     const hemi = new THREE.HemisphereLight('#cfe8ff', '#5a6b4a', 0.9);
     const sun = new THREE.DirectionalLight('#fff4e0', 2.0);
@@ -61,6 +76,15 @@ export class WorldSystem {
     pad.position.set(this.goal.x, 1.46, this.goal.z);
     scene.add(pad);
 
+    // 골인 빔 기둥
+    const beam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.9, 1.4, 26, 20, 1, true),
+      new THREE.MeshBasicMaterial({ color: '#ffd75e', transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false })
+    );
+    beam.position.set(this.goal.x, this.goal.y + 11, this.goal.z);
+    scene.add(beam);
+    this.beam = beam;
+
     // 구름
     const cloudMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1 });
     const cloudGeo = new THREE.SphereGeometry(1, 12, 10);
@@ -83,6 +107,43 @@ export class WorldSystem {
     );
     sea.rotation.x = -Math.PI / 2; sea.position.y = -16;
     scene.add(sea);
+
+    // 파티클 풀 (컨페티 + 착지 더스트 공용, 96개)
+    this.pool = [];
+    const pGeo = new THREE.BoxGeometry(0.14, 0.14, 0.02);
+    for (let i = 0; i < 96; i++) {
+      const m = new THREE.Mesh(pGeo, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0 }));
+      m.visible = false;
+      scene.add(m);
+      this.pool.push({ mesh: m, vel: new THREE.Vector3(), life: 0, max: 1, grav: 9, spin: new THREE.Vector3() });
+    }
+    ctx.events.on(EV.GOAL, () => {
+      this.burst(this.goal, { count: 60, colors: ['#ffd75e', '#ffffff', '#4f7cff', '#e05260'], speed: 7, up: 6, life: 1.8, grav: 8 });
+    });
+    ctx.events.on(EV.LAND, () => {
+      const h = ctx.get('human');
+      _v1.set(h.pos.x, h.pos.y + 0.1, h.pos.z);
+      this.burst(_v1, { count: 8, colors: ['#ffffff'], speed: 2.2, up: 1.5, life: 0.5, grav: 4 });
+    });
+  }
+
+  burst(pos, { count = 20, colors = ['#ffffff'], speed = 5, up = 4, life = 1.2, grav = 9 } = {}) {
+    let n = 0;
+    for (const p of this.pool) {
+      if (p.life > 0) continue;
+      p.life = p.max = life * (0.7 + Math.random() * 0.6);
+      p.grav = grav;
+      p.mesh.visible = true;
+      p.mesh.material.color.set(colors[(Math.random() * colors.length) | 0]);
+      p.mesh.material.opacity = 1;
+      p.mesh.position.copy(pos);
+      p.mesh.scale.setScalar(0.7 + Math.random() * 0.8);
+      const a = Math.random() * Math.PI * 2;
+      const s = speed * (0.4 + Math.random() * 0.8);
+      p.vel.set(Math.cos(a) * s, up * (0.5 + Math.random()), Math.sin(a) * s);
+      p.spin.set(Math.random() * 8 - 4, Math.random() * 8 - 4, Math.random() * 8 - 4);
+      if (++n >= count) break;
+    }
   }
 
   // ---- 지형 생성 ----
@@ -302,6 +363,22 @@ export class WorldSystem {
 
   update(dt, ctx) {
     if (this.ring) this.ring.rotation.z += dt * 0.8;
+    if (this.beam) {
+      const t = ctx.clock.elapsed;
+      this.beam.material.opacity = 0.2 + Math.sin(t * 2.4) * 0.08;
+      this.beam.rotation.y += dt * 0.4;
+    }
+    // 파티클
+    for (const p of this.pool) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.mesh.visible = false; continue; }
+      p.vel.y -= p.grav * dt;
+      p.mesh.position.addScaledVector(p.vel, dt);
+      p.mesh.rotation.x += p.spin.x * dt;
+      p.mesh.rotation.y += p.spin.y * dt;
+      p.mesh.material.opacity = Math.min(1, p.life / (p.max * 0.5));
+    }
   }
 }
 

@@ -18,8 +18,22 @@ engine
   .use('audio', new AudioSystem())
   .use('ui', new UISystem());
 
-await engine.init();
+const loading = document.getElementById('loading');
+const fill = document.getElementById('barFill');
+const loadLabel = document.getElementById('loadLabel');
+
+await engine.init((frac, label) => {
+  fill.style.width = `${Math.round(frac * 100)}%`;
+  if (label) loadLabel.textContent = label;
+});
 engine.start();
+// 로딩 화면 페이드아웃
+requestAnimationFrame(() => {
+  fill.style.width = '100%';
+  loadLabel.textContent = '완료!';
+  setTimeout(() => loading.classList.add('done'), 250);
+  setTimeout(() => loading.remove(), 900);
+});
 
 if (new URLSearchParams(location.search).has('debug')) {
   globalThis.game = engine;

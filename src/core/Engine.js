@@ -50,11 +50,16 @@ export class Engine {
 
   use(key, system) { this.systems.set(key, system); return this; }
 
-  async init() {
+  async init(onProgress) {
     // 순서: world(지형) -> human -> net -> camera -> audio -> ui
-    for (const key of ['world', 'human', 'net', 'camera', 'audio', 'ui']) {
+    const order = ['world', 'human', 'net', 'camera', 'audio', 'ui'];
+    const labels = { world: '섬 만드는 중...', human: '말랑이 깨우는 중...', net: 'P2P 준비 중...', camera: '카메라 조정 중...', audio: '효과음 준비 중...', ui: '메뉴 차리는 중...' };
+    let i = 0;
+    for (const key of order) {
       const s = this.systems.get(key);
       if (s?.init) await s.init(this.ctx);
+      i++;
+      onProgress?.(i / order.length, labels[key] ?? key);
     }
     this.#resize();
     this.events.emit(EV.READY);

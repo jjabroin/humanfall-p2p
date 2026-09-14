@@ -30,6 +30,13 @@ export class CameraSystem {
     if (g !== null && _o.y < g + 0.4) _o.y = g + 0.4;
     ctx.camera.position.lerp(_o, 1 - Math.exp(-14 * dt));
     ctx.camera.lookAt(_t);
+    // 전력질주 시 살짝 광각 (속도감)
+    const sprinting = ctx.input.held('sprint') && human.speed01 > 0.7;
+    const targetFov = sprinting ? 68 : 60;
+    if (Math.abs(ctx.camera.fov - targetFov) > 0.1) {
+      ctx.camera.fov += (targetFov - ctx.camera.fov) * Math.min(1, 6 * dt);
+      ctx.camera.updateProjectionMatrix();
+    }
   }
 }
 const _t = new THREE.Vector3(), _o = new THREE.Vector3();

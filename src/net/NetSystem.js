@@ -4,8 +4,8 @@ import { EV } from '../core/events.js';
 import { Config } from '../core/Config.js';
 import { createHumanMesh, applyHumanPose } from '../human/HumanFactory.js';
 
-// 서버 없는 P2P 멀티플레이 (Trystero torrent 전략 = 공개 트래커 경유 WebRTC).
-// - 방 코드 6자리 → 같은 코드끼리 full-mesh 연결
+// 서버 없는 P2P 멀티플레이 (Trystero torrent 전략 = 공개 WebTorrent 트래커 경유 WebRTC 시그널링).
+// 방 코드 6자리 → 같은 코드끼리 full-mesh 연결. 대칭형 NAT 통과율을 위해 무료 TURN 병행.
 // - 15Hz 플레이어 상태, 10Hz 잡은/소유 프롭 상태, 이벤트(골인/참가)
 const PALETTE = ['#ff8c42', '#3f6fe0', '#22b573', '#e05260', '#a855f7', '#14b8a6'];
 
@@ -38,21 +38,33 @@ export class NetSystem {
     const human = this.ctx.get('human');
     human.setIdentity(this.myName, this.myColor);
 
-    this.#room = joinRoom({ appId: 'humanfall-p2p-v1' }, code);
-    const [sendState, onState] = this.#room.makeAction('st');
-    const [sendProp, onProp] = this.#room.makeAction('pr');
-    const [sendEvt, onEvt] = this.#room.makeAction('ev');
-    this.#sendState = sendState; this.#sendProp = sendProp; this.#sendEvt = sendEvt;
+    // v0.25 API: makeAction은 { send, onMessage } 객체 반환 (구 튜플 아님).
+    // 수신 핸들러 시그니처: (payload, { peerId }) => void
+    // rtcConfig: STUN + 무료 TURN(OpenRelay)으로 NAT 통과율 확보
+    this.#room = joinRoom({
+      appId: 'humanfall-p2p-v1',
+      rtcConfig: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+        ],
+      },
+    }, code);
+    this.#sendState = this.#room.makeAction('st');
+    this.#sendProp = this.#room.makeAction('pr');
+    this.#sendEvt = this.#room.makeAction('ev');
 
-    onState((s, peerId) => this.#onState(s, peerId));
-    onProp((p, peerId) => this.#onProp(p, peerId));
-    onEvt((e, peerId) => this.#onEvent(e, peerId));
+    this.#sendState.onMessage = (data, meta) => this.#onState(data, meta?.peerId);
+    this.#sendProp.onMessage = (data, meta) => this.#onProp(data, meta?.peerId);
+    this.#sendEvt.onMessage = (data, meta) => this.#onEvent(data, meta?.peerId);
 
-    this.#room.onPeerJoin((peerId) => {
+    // v0.25 API: onPeerJoin/onPeerLeave는 setter 프로퍼티 (메서드 아님)
+    this.#room.onPeerJoin = (peerId) => {
       // 새로 온 피어에게 내 정보 인사
-      sendEvt({ t: 'hello', name: this.myName, color: this.myColor });
-    });
-    this.#room.onPeerLeave((peerId) => this.#removePeer(peerId));
+      this.#safeSend(this.#sendEvt, { t: 'hello', name: this.myName, color: this.myColor });
+    };
+    this.#room.onPeerLeave = (peerId) => this.#removePeer(peerId);
 
     // 핑 기반 타임아웃 대신 수신 타임아웃으로 정리
     return true;
@@ -66,17 +78,19 @@ export class NetSystem {
     this.roomCode = null;
   }
 
-  sendEvent(e) { try { this.#sendEvt?.(e); } catch { /* noop */ } }
+  #safeSend(action, data) {
+    try { action?.send(data)?.catch?.(() => {}); } catch { /* noop */ }
+  }
+
+  sendEvent(e) { this.#safeSend(this.#sendEvt, e); }
 
   claimProp(prop) {
     if (!this.online) return;
-    try {
-      this.#sendProp?.({
-        t: 'claim', id: prop.id,
-        p: [prop.pos.x, prop.pos.y, prop.pos.z],
-        v: [prop.vel.x, prop.vel.y, prop.vel.z],
-      });
-    } catch { /* noop */ }
+    this.#safeSend(this.#sendProp, {
+      t: 'claim', id: prop.id,
+      p: [prop.pos.x, prop.pos.y, prop.pos.z],
+      v: [prop.vel.x, prop.vel.y, prop.vel.z],
+    });
   }
 
   #ensurePeer(peerId) {
@@ -96,6 +110,7 @@ export class NetSystem {
   }
 
   #onState(s, peerId) {
+    if (!peerId || !s) return;
     const r = this.#ensurePeer(peerId);
     if (s.n && r.name === '???') {
       r.name = String(s.n).slice(0, 12);
@@ -112,6 +127,7 @@ export class NetSystem {
   }
 
   #onProp(p, peerId) {
+    if (!peerId || !p) return;
     const world = this.ctx.get('world');
     const prop = world.props.find((x) => x.id === p.id);
     if (!prop) return;
@@ -131,6 +147,7 @@ export class NetSystem {
   }
 
   #onEvent(e, peerId) {
+    if (!peerId || !e) return;
     if (e.t === 'hello') {
       const r = this.#ensurePeer(peerId);
       r.name = String(e.name ?? '???').slice(0, 12);
@@ -139,7 +156,7 @@ export class NetSystem {
       r.mesh.setName(r.name);
       this.ctx.events.emit(EV.PEER_JOIN, { id: peerId, name: r.name });
       // 나도 인사 반환
-      try { this.#sendEvt?.({ t: 'helloBack', name: this.myName, color: this.myColor }); } catch { /* noop */ }
+      this.#safeSend(this.#sendEvt, { t: 'helloBack', name: this.myName, color: this.myColor });
     } else if (e.t === 'helloBack') {
       const r = this.#ensurePeer(peerId);
       r.name = String(e.name ?? '???').slice(0, 12);
@@ -183,7 +200,7 @@ export class NetSystem {
     if (this.#acc >= 1 / Config.netHz) {
       this.#acc = 0;
       const s = human.snapshot();
-      try { this.#sendState?.({ ...s, n: this.myName, c: this.myColor }); } catch { /* noop */ }
+      this.#safeSend(this.#sendState, { ...s, n: this.myName, c: this.myColor });
     }
     this.#propAcc += dt;
     if (this.#propAcc >= 1 / Config.propHz) {
@@ -191,9 +208,7 @@ export class NetSystem {
       const world = ctx.get('world');
       for (const p of world.props) {
         if (p.owner === this.selfKey && !p.remote) {
-          try {
-            this.#sendProp?.({ t: 'pos', id: p.id, p: [p.pos.x, p.pos.y, p.pos.z] });
-          } catch { /* noop */ }
+          this.#safeSend(this.#sendProp, { t: 'pos', id: p.id, p: [p.pos.x, p.pos.y, p.pos.z] });
         }
       }
     }
