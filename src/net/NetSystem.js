@@ -12,6 +12,7 @@ const PALETTE = ['#ff8c42', '#3f6fe0', '#22b573', '#e05260', '#a855f7', '#14b8a6
 export class NetSystem {
   mode = 'offline';
   roomCode = null;
+  joinedAt = 0;
   selfKey = 'local';
   myName = '말랑이';
   myColor = PALETTE[0];
@@ -40,15 +41,11 @@ export class NetSystem {
 
     // v0.25 API: makeAction은 { send, onMessage } 객체 반환 (구 튜플 아님).
     // 수신 핸들러 시그니처: (payload, { peerId }) => void
-    // rtcConfig: STUN + 무료 TURN(OpenRelay)으로 NAT 통과율 확보
+    // rtcConfig: STUN으로 NAT 통과 (대칭형 NAT 환경은 TURN 필요, 추후 추가)
     this.#room = joinRoom({
       appId: 'humanfall-p2p-v1',
       rtcConfig: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-        ],
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       },
     }, code);
     this.#sendState = this.#room.makeAction('st');
@@ -67,6 +64,7 @@ export class NetSystem {
     this.#room.onPeerLeave = (peerId) => this.#removePeer(peerId);
 
     // 핑 기반 타임아웃 대신 수신 타임아웃으로 정리
+    this.joinedAt = performance.now();
     return true;
   }
 

@@ -15,6 +15,12 @@ export class UISystem {
     const savedCode = localStorage.getItem('hfall_code');
     if (savedCode) code.value = savedCode;
 
+    // 카톡/인스타 등 인앱브라우저는 WebRTC가 막혀 P2P 불가 → 경고
+    const ua = navigator.userAgent;
+    if (/KAKAOTALK|Instagram|FBAN|FBAV|Line\/|NAVER|wv\)|; wv/.test(ua)) {
+      $('inappWarn').style.display = 'block';
+    }
+
     $('btnCreate').onclick = () => {
       this.#join(genCode(), nick.value || '말랑이', true);
     };
@@ -95,6 +101,7 @@ export class UISystem {
 
   #acc = 0;
   #goalAcc = 0;
+  #diagShown = false;
   update(dt, ctx) {
     if (!this.inGame) return;
     const net = ctx.get('net'), human = ctx.get('human');
@@ -112,6 +119,11 @@ export class UISystem {
       this.#goalAcc = 0;
       const d = human.pos.distanceTo(ctx.get('world').goal);
       this.goalPill.textContent = d < 3 ? '🥅 거의 다 왔다!' : `🥅 ${Math.round(d)}m`;
+    }
+    // 30초 넘게 혼자면 연결 진단 힌트 (1회)
+    if (!this.#diagShown && net.online && net.peers.size === 0 && performance.now() - net.joinedAt > 30000) {
+      this.#diagShown = true;
+      this.toast('연결이 안 되면: ① 방 코드 확인 ② 카톡 인앱 말고 Safari/Chrome ③ 같은 와이파이 권장');
     }
   }
 }
