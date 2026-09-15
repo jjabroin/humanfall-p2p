@@ -2,7 +2,11 @@ import * as THREE from 'three';
 import { joinRoom, selfId } from '@trystero-p2p/torrent';
 import { EV } from '../core/events.js';
 import { Config } from '../core/Config.js';
+import { RelayTransport } from './RelayTransport.js';
 import { createHumanMesh, applyHumanPose } from '../human/HumanFactory.js';
+
+// 중계 폴백용 릴레이 (연결 확인된 곳만)
+const RELAY_URLS = ['wss://nos.lol', 'wss://relay.mostr.pub', 'wss://yabu.me/v2'];
 
 // 서버 없는 P2P 멀티플레이 (Trystero torrent 전략 = 공개 WebTorrent 트래커 경유 WebRTC 시그널링).
 // 방 코드 6자리 → 같은 코드끼리 full-mesh 연결. 대칭형 NAT 통과율을 위해 무료 TURN 병행.
@@ -22,7 +26,9 @@ export class NetSystem {
   #sendState = null;
   #sendProp = null;
   #sendEvt = null;
-  #acc = 0; #propAcc = 0;
+  #acc = 0; #propAcc = 0; #relayAcc = 0;
+  #relay = null;
+  #relayOn = false;
 
   async init(ctx) { this.ctx = ctx; }
 
@@ -71,6 +77,10 @@ export class NetSystem {
   leave() {
     if (this.#room) { try { this.#room.leave(); } catch { /* noop */ } }
     this.#room = null;
+    if (this.#relay) { try { this.#relay.close(); } catch { /* noop */ } }
+    this.#relay = null;
+    this.#relayOn = false;
+    this.#relayAcc = 0;
     for (const id of [...this.peers.keys()]) this.#removePeer(id);
     this.mode = 'offline';
     this.roomCode = null;
@@ -80,7 +90,7 @@ export class NetSystem {
     try { action?.send(data)?.catch?.(() => {}); } catch { /* noop */ }
   }
 
-  sendEvent(e) { this.#safeSend(this.#sendEvt, e); }
+  sendEvent(e) { this.#safeSend(this.#sendEvt, e); if (this.#relayOn) this.#relay?.send({ k: 'ev', d: e }); }
 
   claimProp(prop) {
     if (!this.online) return;
@@ -116,6 +126,12 @@ export class NetSystem {
       r.mesh.suitMat.color.set(r.color);
       r.mesh.setName(r.name);
       this.ctx.events.emit(EV.PEER_JOIN, { id: peerId, name: r.name });
+      // WebRTC 직결 성공 시 중계로 들어온 중복 아바타 제거 (직결 우선)
+      if (!peerId.startsWith('r')) {
+        for (const [id, o] of this.peers) {
+          if (id !== peerId && id.startsWith('r') && o.name === r.name) this.#removePeer(id, true);
+        }
+      }
     }
     r.target.set(s.p[0], s.p[1], s.p[2]);
     r.targetYaw = s.y;
@@ -167,7 +183,7 @@ export class NetSystem {
     }
   }
 
-  #removePeer(peerId) {
+  #removePeer(peerId, silent = false) {
     const r = this.peers.get(peerId);
     if (!r) return;
     // 잡고 있던 프롭 소유권 회수
@@ -184,8 +200,27 @@ export class NetSystem {
       }
     }
     this.ctx.scene.remove(r.mesh.root);
-    this.ctx.events.emit(EV.PEER_LEAVE, { id: peerId, name: r.name });
+    if (!silent) this.ctx.events.emit(EV.PEER_LEAVE, { id: peerId, name: r.name });
     this.peers.delete(peerId);
+  }
+
+  // ---- 중계 폴백 ----
+  #onRelayData(pk, msg) {
+    if (!pk || !msg || typeof msg !== 'object') return;
+    const rid = 'r' + String(pk).slice(0, 10);
+    if (msg.k === 'st' && msg.d) this.#onState({ ...msg.d }, rid);
+    else if (msg.k === 'ev' && msg.d?.t === 'goal') {
+      this.ctx.events.emit(EV.GOAL, { name: msg.d.name ?? '???', self: false });
+    }
+  }
+
+  #maybeEnableRelay() {
+    if (this.#relayOn || this.peers.size > 0) return;
+    if (performance.now() - this.joinedAt < 20000) return;
+    this.#relayOn = true;
+    this.#relay = new RelayTransport(`humanfall-v1:${this.roomCode}`);
+    this.#relay.connect(RELAY_URLS, (pk, msg) => this.#onRelayData(pk, msg));
+    this.ctx.get('ui')?.toast('📡 직접 연결이 안 돼 중계 모드로 시도합니다...');
   }
 
   remotes() { return this.peers.values(); }
@@ -194,6 +229,15 @@ export class NetSystem {
   fixedUpdate(dt, ctx) {
     if (!this.online) return;
     const human = ctx.get('human');
+    this.#maybeEnableRelay();
+    if (this.#relayOn) {
+      this.#relayAcc += dt;
+      if (this.#relayAcc >= 1 / 8) {
+        this.#relayAcc = 0;
+        const s = human.snapshot();
+        this.#relay?.send({ k: 'st', d: { ...s, n: this.myName, c: this.myColor } });
+      }
+    }
     this.#acc += dt;
     if (this.#acc >= 1 / Config.netHz) {
       this.#acc = 0;

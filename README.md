@@ -26,6 +26,7 @@
 
 [Trystero](https://github.com/dmotz/trystero) torrent 전략 = 공개 WebTorrent 트래커를 통한 WebRTC 시그널링.
 서버를 둘 필요 없이 **방 코드 6자리**만 공유하면 연결됩니다. NAT 통과율을 위해 STUN + 무료 TURN(OpenRelay)을 병행합니다.
+직접 연결(WebRTC)이 안 되는 네트워크에서는 20초 후 **중계 모드**(공개 릴레이 경유, 8Hz)로 자동 전환됩니다.
 
 1. `새 방 만들기` → 생성된 코드 확인 (클릭하면 복사)
 2. 친구에게 코드 전달 → 친구는 코드 입력 후 `참가하기`

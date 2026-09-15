@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@trystero-p2p/torrent": "^0.25.4",
+    "nostr-tools": "^2.25.2",
     "three": "^0.185.1"
   },
   "devDependencies": {
