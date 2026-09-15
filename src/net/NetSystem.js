@@ -122,7 +122,7 @@ export class NetSystem {
       r = {
         name: '???', color: '#999999', pos: new THREE.Vector3(0, -50, 0),
         target: new THREE.Vector3(0, -50, 0), vel: new THREE.Vector3(),
-        rxT: 0,
+        rxT: 0, grabTarget: null,
         yaw: 0, targetYaw: 0,
         speed01: 0, airborne: false, grab: 0, walkPhase: Math.random() * 6,
         lookPitch: 0, mesh, lastRx: performance.now(),
@@ -151,6 +151,7 @@ export class NetSystem {
     r.target.set(s.p[0], s.p[1], s.p[2]);
     if (s.v) r.vel.set(s.v[0], s.v[1], s.v[2]);
     r.rxT = performance.now();
+    r.grabTarget = s.t ?? null;   // 이 피어가 잡고 있는 플레이어 이름 (잡기 끌기용)
     r.targetYaw = s.y;
     r.speed01 = s.s; r.airborne = !!s.a; r.grab = s.r ?? 0;
     r.lookPitch = s.lp ?? 0;

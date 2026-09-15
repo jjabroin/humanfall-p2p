@@ -49,6 +49,12 @@ export class UISystem {
     ctx.events.on(EV.GOAL, ({ name, self }) => {
       this.toast(self ? `🏆 ${name} 골인!! 다시 시작 지점으로~` : `🏆 ${name}님이 골인!`);
     });
+    ctx.events.on(EV.CHECKPOINT, ({ index }) => {
+      this.toast(`🚩 체크포인트 ${index + 1}! 여기서 부활합니다`);
+    });
+    ctx.events.on(EV.GRABBED, ({ by }) => {
+      this.toast(`🤏 ${by}에게 붙잡혔다! 흔들어 뿌리치세요!`);
+    });
     ctx.events.on(EV.PEER_JOIN, ({ name }) => this.toast(`👋 ${name} 참가! 연결됨 ✅`));
     ctx.events.on(EV.PEER_LEAVE, ({ name }) => this.toast(`🚪 ${name} 퇴장`));
     ctx.events.on('input:pointerlock', (locked) => {

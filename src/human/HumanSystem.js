@@ -18,6 +18,10 @@ export class HumanSystem {
   nickname = '말랑이';
   color = '#ff8c42';
   wins = 0;
+  respawnPoint = null;   // { x,y,z,yaw } — 체크포인트가 갱신
+  cpIndex = -1;
+  #wasGrabbed = false;
+  #tethers = [];
 
   #prevGrabL = false;
   #prevGrabR = false;
@@ -33,6 +37,19 @@ export class HumanSystem {
     ctx.scene.add(this.#mesh.root);
     this.world = () => ctx.get('world');
     this.net = () => ctx.get('net');
+    const s = this.world().spawnPoint;
+    this.respawnPoint = { x: s.x, y: s.y, z: s.z, yaw: s.yaw };
+    // 잡기 테더선 (최대 3개: 내 양손 + 나를 잡은 놈)
+    for (let i = 0; i < 3; i++) {
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.8 })
+      );
+      line.visible = false;
+      line.frustumCulled = false;
+      ctx.scene.add(line);
+      this.#tethers.push(line);
+    }
   }
 
   setIdentity(name, color) {
@@ -51,9 +68,12 @@ export class HumanSystem {
   }
 
   snapshot() {
+    const tL = this.grabL?.kind === 'player' ? this.grabL.ref.name : null;
+    const tR = this.grabR?.kind === 'player' ? this.grabR.ref.name : null;
     return {
       p: [this.pos.x, this.pos.y, this.pos.z],
       v: [this.vel.x, this.vel.y, this.vel.z],
+      t: tL ?? tR ?? null,   // 내가 잡은 플레이어 이름 (피해자 끌기용)
       y: this.yaw,
       s: this.speed01,
       a: this.grounded ? 0 : 1,
@@ -66,6 +86,15 @@ export class HumanSystem {
   fixedUpdate(dt, ctx) {
     const input = ctx.input, world = this.world(), cam = ctx.get('camera');
     const C = Config;
+
+    // --- 붙잡힘 판정: 누군가의 grab target이 나면 그쪽으로 끌려감 ---
+    let grabber = null;
+    for (const r of this.net()?.remotes() ?? []) {
+      if (r.grabTarget === this.nickname) { grabber = r; break; }
+    }
+    if (grabber && !this.#wasGrabbed) ctx.events.emit(EV.GRABBED, { by: grabber.name });
+    this.#wasGrabbed = !!grabber;
+    const damp = grabber ? 0.45 : 1; // 잡히면 조작 반감
 
     // --- 이동 (카메라 기준) ---
     const wish = new THREE.Vector3(input.move.x, 0, -input.move.y);
@@ -80,7 +109,7 @@ export class HumanSystem {
     if (moving) {
       const targetYaw = Math.atan2(wx, wz) + Math.PI; // 모델 정면 -Z 보정
       this.yaw = dampAngle(this.yaw, targetYaw, 12, dt);
-      const acc = (this.grounded ? C.accel : C.accel * C.airControl);
+      const acc = (this.grounded ? C.accel : C.accel * C.airControl) * damp;
       this.vel.x += wx * acc * dt;
       this.vel.z += wz * acc * dt;
     } else if (this.grounded) {
@@ -118,6 +147,16 @@ export class HumanSystem {
       }
     }
 
+    // --- 잡혀서 끌려가기 (상대 손에 매달림) ---
+    if (grabber) {
+      _t.set(grabber.pos.x - this.pos.x, 0, grabber.pos.z - this.pos.z);
+      const d = _t.length();
+      if (d > 0.9) {
+        _t.normalize().multiplyScalar(45 * dt);
+        this.vel.x += _t.x; this.vel.z += _t.z;
+      }
+    }
+
     // --- 적분 + 충돌 ---
     const wasGrounded = this.grounded, fallV = this.vel.y;
     this.pos.x += this.vel.x * dt;
@@ -126,6 +165,31 @@ export class HumanSystem {
     const col = world.collidePlayer(this.pos, this.vel, dt);
     this.grounded = col.grounded;
     if (!wasGrounded && this.grounded && fallV < -9) ctx.events.emit(EV.LAND);
+    // 무빙 발판에 올라탔으면 같이 이동
+    if (col.grounded && col.ride) {
+      this.pos.x += col.ride.dx;
+      this.pos.z += col.ride.dz;
+    }
+    // 점프대
+    if (!this.grounded) {
+      const pad = world.padAt(this.pos);
+      if (pad && this.vel.y < 3) {
+        this.vel.y = pad.power;
+        ctx.events.emit(EV.JUMP);
+        world.burst(_t.set(pad.x, pad.y + 0.4, pad.z), { count: 10, colors: ['#22d3ee', '#ffffff'], speed: 3, up: 3, life: 0.5, grav: 5 });
+      }
+    }
+    // 체크포인트
+    for (let i = 0; i < world.checkpoints.length; i++) {
+      const cp = world.checkpoints[i];
+      const dx = this.pos.x - cp.x, dy = (this.pos.y + 1) - (cp.y + 1), dz = this.pos.z - cp.z;
+      if (dx * dx + dy * dy + dz * dz < cp.r * cp.r && this.cpIndex !== i) {
+        this.cpIndex = i;
+        this.respawnPoint = { x: cp.x, y: cp.y, z: cp.z, yaw: Math.PI };
+        ctx.events.emit(EV.CHECKPOINT, { index: i });
+        world.burst(_t.set(cp.x, cp.y + 1.5, cp.z), { count: 16, colors: ['#22b573', '#ffd75e'], speed: 3, up: 4, life: 0.8, grav: 6 });
+      }
+    }
 
     // 다른 플레이어와 부딪힘 (부드럽게 밀어냄, 상대도 똑같이 밀어내서 대칭)
     for (const r of this.net()?.remotes() ?? []) {
@@ -157,6 +221,9 @@ export class HumanSystem {
       this.wins++;
       ctx.events.emit(EV.GOAL, { name: this.nickname, self: true });
       this.net()?.sendEvent({ t: 'goal', name: this.nickname });
+      const s = world.spawnPoint;
+      this.respawnPoint = { x: s.x, y: s.y, z: s.z, yaw: s.yaw };
+      this.cpIndex = -1;
       this.respawn(ctx, true);
     }
 
@@ -213,7 +280,7 @@ export class HumanSystem {
   }
 
   respawn(ctx, quiet) {
-    const s = this.world().spawnPoint;
+    const s = this.respawnPoint ?? this.world().spawnPoint;
     this.pos.set(s.x, s.y + 0.1, s.z);
     this.vel.set(0, 0, 0);
     this.yaw = s.yaw;
@@ -240,6 +307,39 @@ export class HumanSystem {
       lookPitch: ctx.get('camera')?.pitch ?? 0,
       taunt: this.#tauntT > 0,
     }, dt, ctx.clock.elapsed);
+    this.#updateTethers();
+  }
+
+  // 잡기 테더선: 내 손→잡은 친구, 잡은 놈→나
+  #updateTethers() {
+    let i = 0;
+    const link = (fromObj, fromSide, toPos) => {
+      if (i >= this.#tethers.length) return;
+      const line = this.#tethers[i++];
+      handWorld(fromSide === 'L' ? this.#mesh.armL : this.#mesh.armR, _h);
+      const p = line.geometry.attributes.position;
+      p.setXYZ(0, _h.x, _h.y, _h.z);
+      p.setXYZ(1, toPos.x, toPos.y, toPos.z);
+      p.needsUpdate = true;
+      line.visible = true;
+    };
+    for (const [g, side] of [[this.grabL, 'L'], [this.grabR, 'R']]) {
+      if (g?.kind === 'player') link(null, side, _t.set(g.ref.pos.x, g.ref.pos.y + 1.2, g.ref.pos.z));
+    }
+    // 나를 잡은 놈 → 내 가슴
+    for (const r of this.net()?.remotes() ?? []) {
+      if (r.grabTarget === this.nickname) {
+        if (i >= this.#tethers.length) break;
+        const line = this.#tethers[i++];
+        const p = line.geometry.attributes.position;
+        p.setXYZ(0, r.pos.x, r.pos.y + 1.2, r.pos.z);
+        p.setXYZ(1, this.pos.x, this.pos.y + 1.2, this.pos.z);
+        p.needsUpdate = true;
+        line.visible = true;
+        break;
+      }
+    }
+    for (; i < this.#tethers.length; i++) this.#tethers[i].visible = false;
   }
 }
 

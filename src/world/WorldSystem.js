@@ -5,11 +5,13 @@ import { EV } from '../core/events.js';
 // 떠있는 섬 레벨 + 잡기/밀기 가능한 프롭 + 골인 링.
 // 물리는 커스텀 경량 물리 (stickfight처럼 외부 물리엔진 없음).
 export class WorldSystem {
-  solids = [];     // { x0,x1,z0,z1,top,bottom }
+  solids = [];     // { x0,x1,z0,z1,top,bottom,mover|null,mesh }
   props = [];      // { id, mesh, pos, vel, half, grabbedBy:{player,side}|null, owner, remote }
   climbWalls = []; // { x0,x1,z0,z1,y0,y1 }
+  pads = [];       // 점프대 { x,y,z,r,power,mesh }
+  checkpoints = []; // { x,y,z,r,mesh }
   spawnPoint = { x: 0, y: 0, z: -4, yaw: Math.PI };
-  goal = new THREE.Vector3(0, 1.6, 51);
+  goal = new THREE.Vector3(0, 8.4, 105);
 
   async init(ctx) {
     this.ctx = ctx;
@@ -47,8 +49,26 @@ export class WorldSystem {
     this.#island(scene, 0, 21, 13, 12, 0);        // 박스 섬
     this.#island(scene, 0, 30.5, 3.2, 5, 0);      // 점프 발판 (틈 2m)
     this.#island(scene, 0, 39, 11, 12, 0);        // 타워 섬
-    this.#island(scene, 0, 50.5, 9, 8, 1.4);      // 골인 단상 (높이 1.4)
+    this.#island(scene, 0, 50.5, 9, 8, 1.4);      // CP1 휴식 단상 (높이 1.4)
     this.#island(scene, -11, 24, 5, 5, 0.8);      // 옆 숨은 섬
+
+    // ---- 지옥 점프맵 ----
+    this.#beam(scene, 0, 58.75, 1.0, 8.5, 1.4);   // 외나무 다리
+    this.#island(scene, 0, 65, 4, 4, 1.4);        // CP2 섬
+    this.#mover(scene, 0, 70.5, 0);               // 무빙 발판 x3
+    this.#mover(scene, 0, 74.5, 2.1);
+    this.#mover(scene, 0, 78.5, 4.2);
+    this.#island(scene, 0, 83.5, 5, 5, 1.4);      // 점프대 섬
+    this.#pad(scene, 0, 1.4, 83.5, 18);           // 하늘로 발사
+    this.#island(scene, 0, 89.5, 6, 6, 7.4);      // 하늘 섬 + CP3
+    this.#pillar(scene, -2, 94.5, 7.4);           // 정밀 발판 x3
+    this.#pillar(scene, 2, 97.5, 7.4);
+    this.#pillar(scene, -2, 100.5, 7.4);
+    this.#island(scene, 0, 105, 8, 8, 7.4);       // 최종 골인 섬
+
+    this.#checkpoint(scene, 0, 1.4, 50.5);        // CP1
+    this.#checkpoint(scene, 0, 1.4, 65);          // CP2
+    this.#checkpoint(scene, 0, 7.4, 89.5);        // CP3
 
     // 클라임 벽: 타워섬->단상으로 올라가는 벽 (z=46.5면)
     this.#climbWall(scene, -2.5, 2.5, 46.4, 46.6, 0, 2.6);
@@ -74,7 +94,7 @@ export class WorldSystem {
       new THREE.CylinderGeometry(1.8, 1.8, 0.12, 28),
       new THREE.MeshStandardMaterial({ color: '#ffd75e', emissive: '#ff9d00', emissiveIntensity: 0.5 })
     );
-    pad.position.set(this.goal.x, 1.46, this.goal.z);
+    pad.position.set(this.goal.x, this.goal.y - 0.94, this.goal.z);
     scene.add(pad);
 
     // 골인 빔 기둥
@@ -166,7 +186,94 @@ export class WorldSystem {
     grass.receiveShadow = true;
     g.add(grass, dirt);
     scene.add(g);
-    this.solids.push({ x0: cx - w / 2, x1: cx + w / 2, z0: cz - d / 2, z1: cz + d / 2, top, bottom: top - 0.5 });
+    this.solids.push({ x0: cx - w / 2, x1: cx + w / 2, z0: cz - d / 2, z1: cz + d / 2, top, bottom: top - 0.5, mover: null, mesh: grass });
+  }
+
+  // 외나무 다리 (좁은 박스)
+  #beam(scene, cx, cz, w, d, top) {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(w, 0.4, d),
+      new THREE.MeshStandardMaterial({ color: '#a4713d', roughness: 0.9 })
+    );
+    mesh.position.set(cx, top - 0.2, cz);
+    mesh.castShadow = mesh.receiveShadow = true;
+    scene.add(mesh);
+    this.solids.push({ x0: cx - w / 2, x1: cx + w / 2, z0: cz - d / 2, z1: cz + d / 2, top, bottom: top - 0.4, mover: null, mesh });
+  }
+
+  // 무빙 발판 (좌우로 왕복)
+  #mover(scene, cx, cz, phase) {
+    const s = 2.4, top = 1.4;
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(s, 0.5, s),
+      new THREE.MeshStandardMaterial({ color: '#d9a03d', roughness: 0.7 })
+    );
+    mesh.position.set(cx, top - 0.25, cz);
+    mesh.castShadow = mesh.receiveShadow = true;
+    const edge = new THREE.LineSegments(
+      new THREE.EdgesGeometry(mesh.geometry),
+      new THREE.LineBasicMaterial({ color: '#7a5210' })
+    );
+    mesh.add(edge);
+    scene.add(mesh);
+    this.solids.push({
+      x0: cx - s / 2, x1: cx + s / 2, z0: cz - s / 2, z1: cz + s / 2,
+      top, bottom: top - 0.5, mesh,
+      mover: { cx, cz, ax: 3.2, az: 0, speed: 0.7, phase, dx: 0, dz: 0 },
+    });
+  }
+
+  // 정밀 점프 기둥
+  #pillar(scene, cx, cz, top) {
+    const s = 1.3;
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(s, 3, s),
+      new THREE.MeshStandardMaterial({ color: '#8a6b4f', roughness: 0.95 })
+    );
+    mesh.position.set(cx, top - 1.5, cz);
+    mesh.castShadow = mesh.receiveShadow = true;
+    const cap = new THREE.Mesh(
+      new THREE.BoxGeometry(s + 0.1, 0.15, s + 0.1),
+      new THREE.MeshStandardMaterial({ color: '#6fbf5a', roughness: 0.9 })
+    );
+    cap.position.set(cx, top - 0.07, cz);
+    scene.add(mesh, cap);
+    this.solids.push({ x0: cx - s / 2, x1: cx + s / 2, z0: cz - s / 2, z1: cz + s / 2, top, bottom: top - 3, mover: null, mesh });
+  }
+
+  // 점프대 (밟으면 위로 발사)
+  #pad(scene, x, topY, z, power) {
+    const mesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.9, 1.0, 0.25, 20),
+      new THREE.MeshStandardMaterial({ color: '#22d3ee', emissive: '#0e7490', emissiveIntensity: 0.9, roughness: 0.4 })
+    );
+    mesh.position.set(x, topY + 0.12, z);
+    scene.add(mesh);
+    this.pads.push({ x, y: topY, z, r: 1.0, power, mesh });
+  }
+
+  // 체크포인트 깃발
+  #checkpoint(scene, x, topY, z) {
+    const g = new THREE.Group();
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.06, 2.2, 10),
+      new THREE.MeshStandardMaterial({ color: '#e5e7eb', roughness: 0.5 })
+    );
+    pole.position.y = 1.1;
+    const flag = new THREE.Mesh(
+      new THREE.BoxGeometry(0.9, 0.55, 0.06),
+      new THREE.MeshStandardMaterial({ color: '#22b573', emissive: '#22b573', emissiveIntensity: 0.7 })
+    );
+    flag.position.set(0.48, 1.8, 0);
+    const orb = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 12, 10),
+      new THREE.MeshStandardMaterial({ color: '#22b573', emissive: '#22b573', emissiveIntensity: 1.4 })
+    );
+    orb.position.y = 2.3;
+    g.add(pole, flag, orb);
+    g.position.set(x, topY, z);
+    scene.add(g);
+    this.checkpoints.push({ x, y: topY, z, r: 1.8, mesh: g, orb });
   }
 
   #climbWall(scene, x0, x1, z0, z1, y0, y1) {
@@ -228,14 +335,25 @@ export class WorldSystem {
   }
 
   // ---- 충돌 ----
-  groundAt(x, z, feetY) {
-    let g = null;
+  solidAt(x, z, feetY) {
+    let best = null;
     for (const s of this.solids) {
       if (x > s.x0 - 0.2 && x < s.x1 + 0.2 && z > s.z0 - 0.2 && z < s.z1 + 0.2) {
-        if (s.top <= feetY + Config.stepHeight && (g === null || s.top > g)) g = s.top;
+        if (s.top <= feetY + Config.stepHeight && (best === null || s.top > best.top)) best = s;
       }
     }
-    return g;
+    return best;
+  }
+  groundAt(x, z, feetY) {
+    return this.solidAt(x, z, feetY)?.top ?? null;
+  }
+
+  padAt(pos) {
+    for (const p of this.pads) {
+      const dx = pos.x - p.x, dz = pos.z - p.z;
+      if (dx * dx + dz * dz < p.r * p.r && pos.y <= p.y + 0.4 && pos.y > p.y - 1.6) return p;
+    }
+    return null;
   }
 
   collidePlayer(pos, vel, dt) {
@@ -256,13 +374,14 @@ export class WorldSystem {
       }
     }
     // 착지
-    const g = this.groundAt(pos.x, pos.z, pos.y + 0.3);
+    const hit = this.solidAt(pos.x, pos.z, pos.y + 0.3);
+    const g = hit?.top ?? null;
     if (g !== null && pos.y <= g + 0.02 && vel.y <= 0.01) {
       pos.y = g; vel.y = 0; grounded = true;
     } else if (g !== null && pos.y < g) {
       pos.y = g; vel.y = 0; grounded = true;
     }
-    return { grounded };
+    return { grounded, ride: grounded && hit?.mover ? hit.mover : null };
   }
 
   nearClimbWall(p, dist) {
@@ -277,7 +396,7 @@ export class WorldSystem {
   }
 
   checkGoal(pos) {
-    return pos.distanceToSquared(this.goal) < 1.44 && Math.abs(pos.y + 1.2 - this.goal.y) < 2.4;
+    return pos.distanceToSquared(this.goal) < 2.56 && Math.abs(pos.y + 1.2 - this.goal.y) < 2.4;
   }
 
   // ---- 잡기 ----
@@ -312,6 +431,20 @@ export class WorldSystem {
   fixedUpdate(dt, ctx) {
     const net = ctx.get('net');
     const human = ctx.get('human');
+    // 무빙 발판 이동 (전후 델타 저장 → 올라탄 플레이어가 같이 이동)
+    const t = ctx.clock.elapsed;
+    for (const s of this.solids) {
+      const m = s.mover;
+      if (!m) continue;
+      const nx = m.cx + Math.sin(t * m.speed + m.phase) * m.ax;
+      const nz = m.cz + Math.cos(t * m.speed * 0.7 + m.phase) * m.az;
+      m.dx = nx - (s.x0 + s.x1) / 2;
+      m.dz = nz - (s.z0 + s.z1) / 2;
+      const w = s.x1 - s.x0, d = s.z1 - s.z0;
+      s.x0 = nx - w / 2; s.x1 = nx + w / 2;
+      s.z0 = nz - d / 2; s.z1 = nz + d / 2;
+      if (s.mesh) s.mesh.position.set(nx, s.top - 0.25, nz);
+    }
     for (const p of this.props) {
       if (p.remote) {
         // 리모트 프롭도 접촉은 감지 (소유권 탈환용), 시뮬은 주인이
@@ -394,6 +527,9 @@ export class WorldSystem {
       const t = ctx.clock.elapsed;
       this.beam.material.opacity = 0.2 + Math.sin(t * 2.4) * 0.08;
       this.beam.rotation.y += dt * 0.4;
+    }
+    for (const c of this.checkpoints) {
+      if (c.orb) c.orb.position.y = 2.3 + Math.sin(ctx.clock.elapsed * 3 + c.x) * 0.12;
     }
     // 파티클
     for (const p of this.pool) {
