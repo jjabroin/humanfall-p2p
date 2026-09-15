@@ -349,7 +349,9 @@ export class WorldSystem {
     }
     return best;
   }
+
   // 설 수 있는 최고면 (지형+프롭). ride는 무빙 발판에서만.
+  // 프롭은 스텝 허용이 작음 (옆에서 부딪히면 위로 순간이동하지 않음)
   standAt(x, z, feetY, ignoreProp = null) {
     const hit = this.solidAt(x, z, feetY);
     let top = hit?.top ?? null;
@@ -360,7 +362,7 @@ export class WorldSystem {
       if (Math.abs(p.vel.y) > 4) continue;
       const t = p.pos.y + p.half;
       if (Math.abs(x - p.pos.x) < p.half + 0.15 && Math.abs(z - p.pos.z) < p.half + 0.15) {
-        if (t <= feetY + Config.stepHeight && (top === null || t > top)) { top = t; ride = null; }
+        if (t <= feetY + 0.3 && (top === null || t > top)) { top = t; ride = null; }
       }
     }
     return top === null ? null : { top, ride };
@@ -523,6 +525,13 @@ export class WorldSystem {
         }
         p.vel.addScaledVector(_f, dt / p.mass);
         p.vel.y -= Config.gravity * dt;
+        // 하나 되기: 무거울수록 몸 속도가 물체 속도에 끌려감 (같이 느려지고 같이 떨어짐)
+        for (const h of p.holds) {
+          const couple = (p.mass / (p.mass + PLAYER_MASS)) * Math.min(1, 8 * dt);
+          h.player.vel.x += (p.vel.x - h.player.vel.x) * couple;
+          h.player.vel.y += (p.vel.y - h.player.vel.y) * couple;
+          h.player.vel.z += (p.vel.z - h.player.vel.z) * couple;
+        }
         this.#stepProp(p, dt);
         this.#groundProp(p, dt, true);
         p.owner = net.selfKey;
@@ -535,7 +544,54 @@ export class WorldSystem {
         this.#stepProp(p, dt);
         this.#groundProp(p, dt, false);
       }
-      p.mesh.position.copy(p.pos);
+    }
+    // 물체끼리 충돌 (2회 완화): 쌓기/밀기. 위로는 절대 튀지 않음.
+    this.#solvePropPairs();
+    for (const p of this.props) {
+      if (!p.remote) p.mesh.position.copy(p.pos);
+    }
+  }
+
+  #solvePropPairs() {
+    const ps = this.props;
+    for (let iter = 0; iter < 2; iter++) {
+      for (let i = 0; i < ps.length; i++) {
+        const a = ps[i];
+        if (a.remote) continue;
+        for (let j = i + 1; j < ps.length; j++) {
+          const b = ps[j];
+          if (b.remote) continue;
+          const ox = (a.half + b.half) - Math.abs(a.pos.x - b.pos.x);
+          const oz = (a.half + b.half) - Math.abs(a.pos.z - b.pos.z);
+          if (ox <= 0 || oz <= 0) continue;
+          const oy = Math.min(a.pos.y + a.half, b.pos.y + b.half) - Math.max(a.pos.y - a.half, b.pos.y - b.half);
+          if (oy <= 0) continue;
+          const ma = a.mass ?? 10, mb = b.mass ?? 10, tot = ma + mb;
+          if (oy < Math.min(ox, oz) * 0.6) {
+            // 위아래로 포개짐: 위를 받침 (y 고정 + 수직속도 동기 + 수평 마찰)
+            const top = a.pos.y > b.pos.y ? a : b;
+            const bot = top === a ? b : a;
+            top.pos.y = bot.pos.y + bot.half + top.half;
+            if (top.vel.y < bot.vel.y) top.vel.y = bot.vel.y;
+            top.vel.x += (bot.vel.x - top.vel.x) * 0.2;
+            top.vel.z += (bot.vel.z - top.vel.z) * 0.2;
+          } else {
+            // 옆으로: 질량 분할 + 반발 (탄성 0.1)
+            let nx = 0, nz = 0, pen = 0;
+            if (ox < oz) { pen = ox; nx = Math.sign(a.pos.x - b.pos.x) || 1; }
+            else { pen = oz; nz = Math.sign(a.pos.z - b.pos.z) || 1; }
+            a.pos.x += nx * pen * (mb / tot); a.pos.z += nz * pen * (mb / tot);
+            b.pos.x -= nx * pen * (ma / tot); b.pos.z -= nz * pen * (ma / tot);
+            const rvx = a.vel.x - b.vel.x, rvz = a.vel.z - b.vel.z;
+            const vn = rvx * nx + rvz * nz;
+            if (vn < 0) {
+              const jimp = -(1 + 0.1) * vn / (1 / ma + 1 / mb);
+              a.vel.x += nx * jimp / ma; a.vel.z += nz * jimp / ma;
+              b.vel.x -= nx * jimp / mb; b.vel.z -= nz * jimp / mb;
+            }
+          }
+        }
+      }
     }
   }
 
@@ -655,6 +711,20 @@ export class WorldSystem {
       net.claimProp(p);
     }
     p.touching = touching;
+  }
+
+  // 로컬 플레이어 vs 리모트 프롭: 플레이어만 밀어냄 (리모트는 주인이 시뮬). Y는 건드리지 않음.
+  pushPlayerFromRemoteProps(human) {
+    for (const p of this.props) {
+      if (!p.remote) continue;
+      _v1.set(human.pos.x - p.pos.x, 0, human.pos.z - p.pos.z);
+      const d = _v1.length(), minD = p.half + Config.playerRadius;
+      const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
+      if (d < minD && d > 0.001 && overlapY) {
+        _v1.normalize();
+        human.pos.addScaledVector(_v1, (minD - d) * 0.5);
+      }
+    }
   }
 
   #pushByRemote(r, p) {    _v1.set(p.pos.x - r.pos.x, 0, p.pos.z - r.pos.z);

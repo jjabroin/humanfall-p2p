@@ -274,6 +274,8 @@ export class HumanSystem {
         this.pos.z += (dz / d) * push;
       }
     }
+    // 리모트 프롭에 겹치면 플레이어가 밀려남
+    world.pushPlayerFromRemoteProps(this);
 
     if (!this.grounded) this.#airTime += dt; else this.#airTime = 0;
 

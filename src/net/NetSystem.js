@@ -373,10 +373,12 @@ export class NetSystem {
         const d2 = p.pos.distanceToSquared(_pv);
         if (d2 > 36) p.pos.copy(_pv); // 6m 이상은 스냅
         else if (d2 > 0.000001) {
-          _nv.copy(_pv).sub(p.pos);
-          const step = Math.min(Math.sqrt(d2), 10 * dt);
-          p.pos.addScaledVector(_nv, step / Math.sqrt(d2));
-          world.collideProp(p);
+          _nv.copy(p.pos); // prev (스윕트 충돌용)
+          _nv2.copy(_pv).sub(p.pos);
+          const d = Math.sqrt(d2);
+          const step = Math.min(d, 10 * dt);
+          p.pos.addScaledVector(_nv2, step / d);
+          world.collideProp(p, _nv);
         }
         p.mesh.position.copy(p.pos);
       }
@@ -385,3 +387,4 @@ export class NetSystem {
 }
 const _pv = new THREE.Vector3();
 const _nv = new THREE.Vector3();
+const _nv2 = new THREE.Vector3();
