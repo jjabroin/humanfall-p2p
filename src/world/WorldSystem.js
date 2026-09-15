@@ -281,9 +281,18 @@ export class WorldSystem {
   }
 
   // ---- 잡기 ----
+  // 소유권은 (timestamp, owner) 전순서로 수렴: 최신 선언이 항상 승리 → 양쪽이 같은 주인으로 합의
+  #takeOwnership(prop) {
+    const net = this.ctx.get('net');
+    prop.owner = net.selfKey;
+    prop.claimT = Date.now();
+    prop.claimBy = net.selfKey;
+    prop.remote = false;
+    prop.syncTarget = null;
+  }
   setGrab(prop, player, side) {
     prop.grabbedBy = { player, side };
-    prop.owner = this.ctx.get('net').selfKey;
+    this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
     prop.vel.set(0, 0, 0);
   }
@@ -296,6 +305,7 @@ export class WorldSystem {
     const hs = Math.hypot(player.vel.x, player.vel.z);
     prop.vel.addScaledVector(f, Math.min(hs * 0.6, 3) + Config.throwBoost * 0.5);
     prop.grabbedBy = null;
+    this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
   }
 
@@ -303,15 +313,19 @@ export class WorldSystem {
     const net = ctx.get('net');
     const human = ctx.get('human');
     for (const p of this.props) {
-      if (p.remote) continue; // 리모트 프롭은 net이 보간
+      if (p.remote) {
+        // 리모트 프롭도 접촉은 감지 (소유권 탈환용), 시뮬은 주인이
+        this.#seizeCheck(p, human, net);
+        continue;
+      }
       if (p.grabbedBy) {
-        // 잡은 손 위치로 스프링 추종
+        // 잡은 손 위치로 스프링 추종 (강성+감쇠로 흔들림 없이)
         const holder = p.grabbedBy.player;
         holder.handPos(p.grabbedBy.side, _v1);
         _v2.copy(_v1).add(p.grabbedBy.offset ?? _zero);
         _v3.copy(_v2).sub(p.pos);
-        p.vel.copy(_v3.multiplyScalar(10));
-        // 너무 늘어나면 감속
+        p.vel.addScaledVector(_v3, 90 * dt);
+        p.vel.multiplyScalar(Math.max(0, 1 - 12 * dt));
         if (p.vel.lengthSq() > 200) p.vel.setLength(Math.sqrt(200));
         p.pos.addScaledVector(p.vel, dt);
         p.owner = net.selfKey;
@@ -347,14 +361,26 @@ export class WorldSystem {
       p.vel.addScaledVector(_v1, push * 0.35);
       p.vel.addScaledVector(human.vel, 0.06);
       if (p.owner !== this.ctx.get('net').selfKey) {
-        p.owner = this.ctx.get('net').selfKey;
+        this.#takeOwnership(p);
         this.ctx.get('net')?.claimProp(p);
       }
     }
   }
 
-  #pushByRemote(r, p) {
-    _v1.set(p.pos.x - r.pos.x, 0, p.pos.z - r.pos.z);
+  // 남의 프롭에 닿으면 소유권 탈환 (접촉 엣지에서 1회, 상대가 잡는 중이면 제외)
+  #seizeCheck(p, human, net) {
+    _v1.set(p.pos.x - human.pos.x, 0, p.pos.z - human.pos.z);
+    const d = _v1.length();
+    const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
+    const touching = d < p.half + Config.playerRadius + 0.15 && overlapY;
+    if (touching && !p.touching && !p.grabbedBy && !p.heldByOther && p.owner !== net.selfKey) {
+      this.#takeOwnership(p);
+      net.claimProp(p);
+    }
+    p.touching = touching;
+  }
+
+  #pushByRemote(r, p) {    _v1.set(p.pos.x - r.pos.x, 0, p.pos.z - r.pos.z);
     const d = _v1.length(), minD = p.half + Config.playerRadius;
     if (d < minD && d > 0.001) {
       _v1.normalize();

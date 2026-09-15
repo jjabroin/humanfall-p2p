@@ -29,6 +29,7 @@ export class NetSystem {
   #acc = 0; #propAcc = 0; #relayAcc = 0;
   #relay = null;
   #relayOn = false;
+  #relayPropTick = 0;
 
   async init(ctx) { this.ctx = ctx; }
 
@@ -64,13 +65,21 @@ export class NetSystem {
 
     // v0.25 API: onPeerJoin/onPeerLeave는 setter 프로퍼티 (메서드 아님)
     this.#room.onPeerJoin = (peerId) => {
-      // 새로 온 피어에게 내 정보 인사
+      // 새로 온 피어에게 내 정보 인사 + 소유 프롭 재선언
       this.#safeSend(this.#sendEvt, { t: 'hello', name: this.myName, color: this.myColor });
+      this.#reclaimOwned();
     };
     this.#room.onPeerLeave = (peerId) => this.#removePeer(peerId);
 
     // 핑 기반 타임아웃 대신 수신 타임아웃으로 정리
     this.joinedAt = performance.now();
+    // 손대지 않은 프롭 소유권 가져오기 (주인 없는 프롭은 아무도 시뮬 안 함)
+    for (const p of this.ctx.get('world').props) {
+      if (p.owner !== this.selfKey && !p.grabbedBy) {
+        p.owner = this.selfKey; p.claimT = Date.now(); p.claimBy = this.selfKey;
+        p.remote = false; p.syncTarget = null;
+      }
+    }
     return true;
   }
 
@@ -94,11 +103,15 @@ export class NetSystem {
 
   claimProp(prop) {
     if (!this.online) return;
-    this.#safeSend(this.#sendProp, {
+    const msg = {
       t: 'claim', id: prop.id,
       p: [prop.pos.x, prop.pos.y, prop.pos.z],
       v: [prop.vel.x, prop.vel.y, prop.vel.z],
-    });
+      ct: prop.claimT ?? 0, by: prop.claimBy ?? '',
+      h: !!prop.grabbedBy,
+    };
+    this.#safeSend(this.#sendProp, msg);
+    if (this.#relayOn) this.#relay?.send({ k: 'claim', d: msg });
   }
 
   #ensurePeer(peerId) {
@@ -108,7 +121,9 @@ export class NetSystem {
       this.ctx.scene.add(mesh.root);
       r = {
         name: '???', color: '#999999', pos: new THREE.Vector3(0, -50, 0),
-        target: new THREE.Vector3(0, -50, 0), yaw: 0, targetYaw: 0,
+        target: new THREE.Vector3(0, -50, 0), vel: new THREE.Vector3(),
+        rxT: 0,
+        yaw: 0, targetYaw: 0,
         speed01: 0, airborne: false, grab: 0, walkPhase: Math.random() * 6,
         lookPitch: 0, mesh, lastRx: performance.now(),
       };
@@ -134,10 +149,49 @@ export class NetSystem {
       }
     }
     r.target.set(s.p[0], s.p[1], s.p[2]);
+    if (s.v) r.vel.set(s.v[0], s.v[1], s.v[2]);
+    r.rxT = performance.now();
     r.targetYaw = s.y;
     r.speed01 = s.s; r.airborne = !!s.a; r.grab = s.r ?? 0;
     r.lookPitch = s.lp ?? 0;
     r.lastRx = performance.now();
+  }
+
+  // 소유권 선언 적용: (ct, by) 튜플이 기존보다 클 때만 → 동시 선언도 양쪽이 같은 결론에 수렴.
+  // 내가 주인이라고 생각하는데 상대 선언/업데이트가 오면 충돌 → 새 타임스탬프로 재선언해 수렴 유도.
+  #reassert(prop) {
+    prop.claimT = Date.now(); prop.claimBy = this.selfKey;
+    prop.owner = this.selfKey; prop.remote = false;
+    this.claimProp(prop);
+  }
+  #applyClaim(prop, d, senderId) {
+    if (prop.grabbedBy) { this.#reassert(prop); return false; }
+    const nt = d.ct ?? 0, nb = d.by ?? senderId;
+    const ot = prop.claimT ?? -1, ob = prop.claimBy ?? '';
+    if (nt < ot || (nt === ot && nb <= ob)) {
+      if (prop.owner === this.selfKey && senderId !== this.selfKey) this.#reassert(prop);
+      return false;
+    }
+    prop.claimT = nt; prop.claimBy = nb;
+    prop.owner = senderId;
+    prop.remote = true;
+    prop.heldByOther = !!d.h;
+    prop.pos.set(d.p[0], d.p[1], d.p[2]);
+    prop.mesh.position.copy(prop.pos);
+    return true;
+  }
+  #applyPropPos(prop, d, senderId) {
+    if (prop.grabbedBy) return; // 내가 잡는 중이면 내 시뮬이 권위
+    if (prop.owner === senderId) {
+      prop.remote = true;
+      if (!prop.syncTarget) prop.syncTarget = new THREE.Vector3();
+      if (!prop.syncVel) prop.syncVel = new THREE.Vector3();
+      prop.syncTarget.set(d.p[0], d.p[1], d.p[2]);
+      if (d.v) prop.syncVel.set(d.v[0], d.v[1], d.v[2]);
+      prop.syncT = performance.now();
+    } else if (prop.owner === this.selfKey && senderId !== this.selfKey) {
+      this.#reassert(prop); // 상대도 주인 행세 → 재선언으로 합의
+    }
   }
 
   #onProp(p, peerId) {
@@ -146,17 +200,9 @@ export class NetSystem {
     const prop = world.props.find((x) => x.id === p.id);
     if (!prop) return;
     if (p.t === 'claim') {
-      if (prop.grabbedBy) return; // 내가 잡고 있으면 내 권한 유지
-      prop.owner = peerId;
-      prop.remote = true;
-      prop.pos.set(p.p[0], p.p[1], p.p[2]);
-      prop.mesh.position.copy(prop.pos);
-    } else if (p.t === 'pos' && prop.owner === peerId) {
-      prop.remote = true;
-      _pv.set(p.p[0], p.p[1], p.p[2]);
-      // 큰 차이는 스냅, 작은 차이는 WorldSystem이 메시를 보간... 단순화를 위해 직접 lerp 타겟 저장
-      if (!prop.syncTarget) prop.syncTarget = new THREE.Vector3();
-      prop.syncTarget.copy(_pv);
+      this.#applyClaim(prop, p, peerId);
+    } else if (p.t === 'pos') {
+      this.#applyPropPos(prop, p, peerId);
     }
   }
 
@@ -205,12 +251,32 @@ export class NetSystem {
   }
 
   // ---- 중계 폴백 ----
+  // 새 피어가 생기면 내가 가진 프롭 소유권을 새 타임스탬프로 다시 알림 (최신 선언 승리로 수렴)
+  #reclaimOwned() {
+    const world = this.ctx.get('world');
+    for (const p of world.props) {
+      if (p.owner === this.selfKey && !p.grabbedBy) {
+        p.claimT = Date.now(); p.claimBy = this.selfKey;
+        this.claimProp(p);
+      }
+    }
+  }
   #onRelayData(pk, msg) {
     if (!pk || !msg || typeof msg !== 'object') return;
     const rid = 'r' + String(pk).slice(0, 10);
     if (msg.k === 'st' && msg.d) this.#onState({ ...msg.d }, rid);
     else if (msg.k === 'ev' && msg.d?.t === 'goal') {
       this.ctx.events.emit(EV.GOAL, { name: msg.d.name ?? '???', self: false });
+    } else if (msg.d?.id) {
+      // 중계 프롭 동기화 (WebRTC #onProp와 동일 규칙)
+      const world = this.ctx.get('world');
+      const prop = world.props.find((x) => x.id === msg.d.id);
+      if (!prop) return;
+      if (msg.k === 'claim') {
+        this.#applyClaim(prop, msg.d, rid);
+      } else if (msg.k === 'pr') {
+        this.#applyPropPos(prop, msg.d, rid);
+      }
     }
   }
 
@@ -220,11 +286,15 @@ export class NetSystem {
     this.#relayOn = true;
     this.#relay = new RelayTransport(`humanfall-v1:${this.roomCode}`);
     this.#relay.connect(RELAY_URLS, (pk, msg) => this.#onRelayData(pk, msg));
+    this.#reclaimOwned();
     this.ctx.get('ui')?.toast('📡 직접 연결이 안 돼 중계 모드로 시도합니다...');
   }
 
   remotes() { return this.peers.values(); }
   playerCount() { return this.peers.size + 1; }
+  relayStatus() {
+    return { on: this.#relayOn, open: this.#relay?.openCount ?? 0, selfKey: String(this.selfKey).slice(0, 8) };
+  }
 
   fixedUpdate(dt, ctx) {
     if (!this.online) return;
@@ -232,10 +302,20 @@ export class NetSystem {
     this.#maybeEnableRelay();
     if (this.#relayOn) {
       this.#relayAcc += dt;
-      if (this.#relayAcc >= 1 / 8) {
+      if (this.#relayAcc >= 1 / 10) {
         this.#relayAcc = 0;
         const s = human.snapshot();
         this.#relay?.send({ k: 'st', d: { ...s, n: this.myName, c: this.myColor } });
+        // 소유 프롭도 중계 (5Hz: 두 틱에 한 번)
+        this.#relayPropTick++;
+        if (this.#relayPropTick % 2 === 0) {
+          const world = ctx.get('world');
+          for (const p of world.props) {
+            if (p.owner === this.selfKey && !p.remote) {
+              this.#relay?.send({ k: 'pr', d: { id: p.id, p: [p.pos.x, p.pos.y, p.pos.z], v: [p.vel.x, p.vel.y, p.vel.z] } });
+            }
+          }
+        }
       }
     }
     this.#acc += dt;
@@ -250,7 +330,7 @@ export class NetSystem {
       const world = ctx.get('world');
       for (const p of world.props) {
         if (p.owner === this.selfKey && !p.remote) {
-          this.#safeSend(this.#sendProp, { t: 'pos', id: p.id, p: [p.pos.x, p.pos.y, p.pos.z] });
+          this.#safeSend(this.#sendProp, { t: 'pos', id: p.id, p: [p.pos.x, p.pos.y, p.pos.z], v: [p.vel.x, p.vel.y, p.vel.z] });
         }
       }
     }
@@ -258,10 +338,14 @@ export class NetSystem {
 
   update(dt, ctx) {
     const now = performance.now();
-    const k = 1 - Math.exp(-10 * dt);
+    const k = 1 - Math.exp(-12 * dt);
     for (const [id, r] of this.peers) {
       if (now - r.lastRx > 8000 && r.name !== '???') { this.#removePeer(id); continue; }
-      r.pos.lerp(r.target, k);
+      // 데드레코닝: 마지막 속도로 예측한 지점으로 보간 (지연 체감 감소)
+      const age = Math.min(0.5, (now - r.rxT) / 1000);
+      _pv.copy(r.target).addScaledVector(r.vel, age);
+      if (r.pos.distanceToSquared(_pv) > 16) r.pos.copy(_pv); // 4m 이상 벌어지면 스냅
+      else r.pos.lerp(_pv, k);
       let d = (r.targetYaw - r.yaw) % (Math.PI * 2);
       if (d > Math.PI) d -= Math.PI * 2;
       if (d < -Math.PI) d += Math.PI * 2;
@@ -275,11 +359,15 @@ export class NetSystem {
         lookPitch: r.lookPitch, taunt: false,
       }, dt, ctx.clock.elapsed);
     }
-    // 리모트 프롭 보간
+    // 리모트 프롭 보간 (속도 예측 포함)
     const world = ctx.get('world');
     for (const p of world.props) {
       if (p.remote && p.syncTarget) {
-        p.pos.lerp(p.syncTarget, 1 - Math.exp(-12 * dt));
+        const age = Math.min(0.5, (now - (p.syncT ?? now)) / 1000);
+        _pv.copy(p.syncTarget);
+        if (p.syncVel) _pv.addScaledVector(p.syncVel, age);
+        if (p.pos.distanceToSquared(_pv) > 16) p.pos.copy(_pv);
+        else p.pos.lerp(_pv, 1 - Math.exp(-12 * dt));
         p.mesh.position.copy(p.pos);
       }
     }

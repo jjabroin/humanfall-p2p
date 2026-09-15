@@ -53,6 +53,7 @@ export class HumanSystem {
   snapshot() {
     return {
       p: [this.pos.x, this.pos.y, this.pos.z],
+      v: [this.vel.x, this.vel.y, this.vel.z],
       y: this.yaw,
       s: this.speed01,
       a: this.grounded ? 0 : 1,
@@ -125,6 +126,17 @@ export class HumanSystem {
     const col = world.collidePlayer(this.pos, this.vel, dt);
     this.grounded = col.grounded;
     if (!wasGrounded && this.grounded && fallV < -9) ctx.events.emit(EV.LAND);
+
+    // 다른 플레이어와 부딪힘 (부드럽게 밀어냄, 상대도 똑같이 밀어내서 대칭)
+    for (const r of this.net()?.remotes() ?? []) {
+      const dx = this.pos.x - r.pos.x, dz = this.pos.z - r.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d < 0.7 && d > 0.001 && Math.abs(this.pos.y - r.pos.y) < 1.5) {
+        const push = (0.7 - d) * 0.5;
+        this.pos.x += (dx / d) * push;
+        this.pos.z += (dz / d) * push;
+      }
+    }
 
     if (!this.grounded) this.#airTime += dt; else this.#airTime = 0;
 

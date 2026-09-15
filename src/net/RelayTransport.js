@@ -15,6 +15,7 @@ export class RelayTransport {
   #subId = '';
   #onData = null;
   #closed = false;
+  #outbox = []; // 소켓 열리기 전 메시지 보관 (소유권 선언 유실 방지)
 
   constructor(roomTag) {
     this.#roomTag = roomTag;
@@ -48,6 +49,7 @@ export class RelayTransport {
         [`#${TAG}`]: [this.#roomTag],
         since: Math.floor(Date.now() / 1000) - 5,
       }]));
+      this.#flush();
     };
     ws.onmessage = (e) => this.#handle(String(e.data));
     ws.onclose = () => { rec.open = false; this.#retry(url); };
@@ -71,13 +73,32 @@ export class RelayTransport {
   }
 
   async send(obj) {
-    if (this.#closed || this.openCount === 0) return;
+    if (this.#closed) return;
     const ev = await this.#sign(JSON.stringify(obj));
-    if (!ev) return;
+    if (!ev || this.#closed) return;
     const wire = JSON.stringify(['EVENT', ev]);
+    let sent = false;
     for (const s of this.#sockets.values()) {
-      if (s.open) { try { s.ws.send(wire); } catch { /* noop */ } }
+      if (s.open) { try { s.ws.send(wire); sent = true; } catch { /* noop */ } }
     }
+    // 열린 소켓이 없으면 보관 후 첫 연결 시 발송 (낡은 상태 메시지는 버림)
+    if (!sent) {
+      this.#outbox.push({ wire, t: Date.now(), k: obj.k });
+      if (this.#outbox.length > 30) this.#outbox.shift();
+    }
+  }
+
+  #flush() {
+    if (this.#outbox.length === 0) return;
+    const now = Date.now();
+    for (const m of this.#outbox) {
+      if (m.k === 'st' && now - m.t > 2000) continue;
+      for (const s of this.#sockets.values()) {
+        if (s.open) { try { s.ws.send(m.wire); } catch { /* noop */ } break;
+        }
+      }
+    }
+    this.#outbox.length = 0;
   }
 
   async #sign(content) {
