@@ -178,8 +178,11 @@ export class HumanSystem {
     // --- 벽 잡고 오르기 (클라임 벽 근처, 공중, 위를 보며 W) ---
     const wallHold = (this.grabL?.kind === 'wall' || this.grabR?.kind === 'wall');
     if (wallHold && !this.grounded) {
-      this.vel.y = THREE.MathUtils.clamp(this.vel.y, -1.2, 3.0); // 매달리기: 천천히 미끄러지고 과상승 방지
-      if (cam.pitch < -0.2 && input.move.y > 0.3) this.vel.y = 2.0;  // 위 보고 앞으로 = 오르기
+      // 매달리기: 가슴보다 위를 잡으면 거의 안 미끄러짐. 낮게 잡으면 미끄러짐.
+      const chestY = this.pos.y + 1.25;
+      const hangHold = (this.grabL?.kind === 'wall' && this.grabL.point.y > chestY - 0.3)
+        || (this.grabR?.kind === 'wall' && this.grabR.point.y > chestY - 0.3);
+      this.vel.y = THREE.MathUtils.clamp(this.vel.y, hangHold ? -0.15 : -1.2, 3.0);
     } else {
       this.vel.y -= C.gravity * dt;
       if (this.vel.y < -30) this.vel.y = -30;
@@ -213,15 +216,17 @@ export class HumanSystem {
 
     // --- 정적 잡기 풀업: 벽/모서리를 잡고 매달리면 몸이 올라감 ---
     // (움직이지 않는 대상이라 반작용이 전부 몸으로 옴. HFF 등반의 핵심)
+    // 당기는 세기는 시야각 비례: 아래를 볼수록 강하게. 수평 보면 매달리기만.
     // 위로 당기는 분력은 전부, 아래로 잡아끄는 분력은 수평만 살짝 (점프 방해 금지)
     this.chestPos(_c);
+    const pullScale = THREE.MathUtils.clamp((cam.pitch - 0.02) / 0.45, 0, 1);
     for (const g of [this.grabL, this.grabR]) {
       if (g?.kind !== 'wall') continue;
       _t.set(g.point.x - _c.x, g.point.y - _c.y, g.point.z - _c.z);
       const d = _t.length();
       if (d < 0.05) continue;
       _t.multiplyScalar(Math.min(2200, 900 * d) / d);
-      const k = (dt / 70) * (this.grounded ? 0.2 : 1);
+      const k = (dt / 70) * (this.grounded ? 0.2 : 1) * pullScale;
       if (_t.y > 0) {
         this.vel.addScaledVector(_t, k);
       } else {

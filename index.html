@@ -119,6 +119,7 @@
     touch-action: none; user-select: none; -webkit-user-select: none;
   }
   #touchBtns button:active { background: rgba(79,124,255,.7); }
+  #touchBtns button.on { background: rgba(79,124,255,.85); border-color: #fff; }
 </style>
 </head>
 <body>
@@ -146,11 +147,11 @@
         </div>
         <div class="help">
           ⌨️ <b>WASD</b> 이동 · <b>Space</b> 점프 · <b>Shift</b> 달리기<br/>
-          🖱️ <b>좌클릭/우클릭</b> 왼손/오른손 잡기 · <b>E/휠클릭</b> 양손 동시 · <b>마우스</b> 시점 · <b>휠</b> 줌<br/>
-          📱 모바일: <b>왼쪽 스틱</b> 이동(끝까지 밀면 달리기) · <b>오른쪽 드래그</b> 시점 · 🤏🤲⬆️ 버튼<br/>
+          🖱️ <b>좌클릭/우클릭</b> 왼손/오른손 잡기·놓기(토글) · <b>E/휠클릭</b> 양손 동시 · <b>마우스</b> 시점 · <b>휠</b> 줌<br/>
+          📱 모바일: <b>왼쪽 스틱</b> 이동(끝까지 밀면 달리기) · <b>오른쪽 드래그</b> 시점 · 🤏🤲⬆️ 버튼(토글)<br/>
           📦 박스를 잡고 던지고, <b>친구를 붙잡고 질질 끌고</b>, 빛나는 <b>골인 링</b>에 들어가세요!<br/>
           🏋️ 가까이서 잡고 <b>위를 보면 번쩍!</b> 가벼운 건 한 손, 공은 양손, 큰 상자는 못 들고 끄는 것만 됨<br/>
-          🧗 <b>벽·모서리 잡고 매달려서 풀업 등반!</b> 무거운 걸 밀면 몸이 밀려나고, 상자 위에도 올라설 수 있음<br/>
+          🧗 <b>벽·모서리 잡고 매달린 뒤 아래를 보면 풀업!</b> 아래를 볼수록 강하게 올라감<br/>
           😈 뒤쪽은 <b>지옥 점프맵</b> (외나무·무빙발판·점프대) — 🚩 체크포인트가 살길!
         </div>
       </div>
@@ -159,7 +160,7 @@
       <div id="topbar"><div class="pill" id="roomPill" title="클릭하면 복사">방 코드 <b id="roomCode">------</b> 📋</div><div class="pill" id="goalPill">🥅 --m</div></div>
       <div id="players"></div>
       <div id="toast"></div>
-      <div id="grabTip">🤏 잡았다! 놓으려면 클릭 해제</div>
+      <div id="grabTip">🤏 잡았다! 다시 누르면 놓음</div>
       <div id="hint">WASD 이동 · Space 점프 · 좌/우클릭 잡기 · 골인 링으로!</div>
     </div>
     <div id="lockTip">🖱️ 클릭해서 마우스 잠그기</div>

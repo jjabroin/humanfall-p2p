@@ -8,7 +8,6 @@ const DEADZONE = 0.22;
 const KEYMAP = {
   KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right',
   Space: 'jump', ShiftLeft: 'sprint', ShiftRight: 'sprint',
-  KeyE: 'both',
   KeyT: 'taunt', Enter: 'jump',
 };
 const KEY_LOOK = {
@@ -26,9 +25,9 @@ export class Input {
   #time = 0;
   #locked = false;
   #el = null;
-  grabL = false;                // 왼손 홀드
-  grabR = false;                // 오른손 홀드
-  both = false;                 // 양손 동시 잡기 홀드
+  grabL = false;                // 왼손 (토글)
+  grabR = false;                // 오른손 (토글)
+  both = false;                 // 양손 동시 잡기 (토글)
 
   attach(el, events) {
     this.#el = el;
@@ -44,6 +43,7 @@ export class Input {
     addEventListener('keydown', (e) => {
       if (KEY_LOOK[e.code]) { e.preventDefault(); this.#down.add(e.code); return; }
       if (e.repeat) return;
+      if (e.code === 'KeyE') { this.both = !this.both; return; } // 양손 토글
       const a = KEYMAP[e.code];
       if (!a) return;
       e.preventDefault();
@@ -61,15 +61,11 @@ export class Input {
 
     el.addEventListener('mousedown', (e) => {
       if (!this.#locked) { el.requestPointerLock?.(); return; }
-      if (e.button === 0) this.grabL = true;
-      if (e.button === 2) this.grabR = true;
-      if (e.button === 1) { this.both = true; e.preventDefault(); }
+      if (e.button === 0) this.grabL = !this.grabL;       // 토글
+      if (e.button === 2) this.grabR = !this.grabR;       // 토글
+      if (e.button === 1) { this.both = !this.both; e.preventDefault(); } // 토글
     });
-    addEventListener('mouseup', (e) => {
-      if (e.button === 0) this.grabL = false;
-      if (e.button === 2) this.grabR = false;
-      if (e.button === 1) this.both = false;
-    });
+    // mouseup에서는 해제하지 않음 (토글식)
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('wheel', (e) => { this.zoom += Math.sign(e.deltaY); }, { passive: true });
 
@@ -169,7 +165,7 @@ export class Input {
     this.#el.addEventListener('touchend', endTouch);
     this.#el.addEventListener('touchcancel', endTouch);
 
-    // 버튼: 점프 / 왼손 / 오른손
+    // 버튼: 점프 / 왼손 / 오른손 / 양손 (잡기는 토글)
     const bind = (id, down, up) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -179,9 +175,16 @@ export class Input {
       el.addEventListener('touchcancel', off);
     };
     bind('tJump', () => this.setAction?.('jump', true), () => this.setAction?.('jump', false));
-    bind('tGrabL', () => { this.grabL = true; }, () => { this.grabL = false; });
-    bind('tGrabR', () => { this.grabR = true; }, () => { this.grabR = false; });
-    bind('tBoth', () => { this.both = true; }, () => { this.both = false; });
+    bind('tGrabL', () => { this.grabL = !this.grabL; }, () => {});
+    bind('tGrabR', () => { this.grabR = !this.grabR; }, () => {});
+    bind('tBoth', () => { this.both = !this.both; }, () => {});
+  }
+
+  // 터치 버튼 토글 표시 동기화
+  #syncTouchBtns() {
+    if (!this.#isTouch) return;
+    const set = (id, on) => document.getElementById(id)?.classList.toggle('on', on);
+    set('tGrabL', this.grabL); set('tGrabR', this.grabR); set('tBoth', this.both);
   }
 
   get pointerLocked() { return this.#locked; }
@@ -202,10 +205,12 @@ export class Input {
 
   #pad = null;
   #padDriving = false;
+  #padPrev = [false, false, false];
 
   update(dt) {
     this.#time += dt;
     this.#pollPad();
+    this.#syncTouchBtns();
     for (const code in KEY_LOOK) {
       if (!this.#down.has(code)) continue;
       const [ax, ay] = KEY_LOOK[code];
@@ -235,7 +240,15 @@ export class Input {
     const b = gp.buttons, p = (i) => !!b[i]?.pressed;
     this.setAction?.('jump', p(0));
     this.setAction?.('sprint', p(10));
-    this.grabL = p(6) || p(2); this.grabR = p(7) || p(3);
-    this.both = p(5);
+    // 게임패드 잡기도 토글 (엣지)
+    const tg = [p(6) || p(2), p(7) || p(3), p(5)];
+    tg.forEach((v, i) => {
+      if (v && !this.#padPrev[i]) {
+        if (i === 0) this.grabL = !this.grabL;
+        else if (i === 1) this.grabR = !this.grabR;
+        else this.both = !this.both;
+      }
+      this.#padPrev[i] = v;
+    });
   }
 }
