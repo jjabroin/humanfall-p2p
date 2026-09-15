@@ -124,6 +124,8 @@ export function applyHumanPose(r, s, dt, time) {
 }
 
 function poseArm(arm, swing, reach, pitch, time, strain = 0, heave = 0, seed = 0) {
+  arm.shoulder.scale.set(1, 1, 1);
+  arm.elbow.scale.set(1, 1, 1);
   const wob = Math.sin(time * 3.1 + seed) * 0.04;
   // 무거우면 팔에 힘이 풀림: 덜 올라가고 부들부들 떨림. 번쩍 모드면 힘줘서 쭉.
   const droop = (1 - 0.45 * Math.min(1, strain)) * (1 - heave) + heave * 0.92;
@@ -139,8 +141,7 @@ const _ikP = new THREE.Vector3(), _ikE = new THREE.Vector3(), _ikQ = new THREE.Q
 const _ikDown = new THREE.Vector3(0, -1, 0);
 
 /**
- * 투본 IK: 어깨→팔꿈치→손. 손은 항상 어깨 반경 안에 붙어서 렌더링.
- * target이 손이 닿는 위치(월드).returns 손이 실제 닿은 위치.
+ * 투본 IK: 어깨→팔꿈치→손. 손은 잡은 점에 항상 붙음 (팔이 고무줄처럼 늘어남, HFF식).
  */
 export function solveArmIK(arm, root, targetWorld) {
   arm.shoulder.updateWorldMatrix(true, false);
@@ -148,15 +149,21 @@ export function solveArmIK(arm, root, targetWorld) {
   _ikT.copy(targetWorld);
   _ikD.copy(_ikT).sub(_ikS);
   let d = _ikD.length();
-  const maxR = arm.upperLen + arm.foreLen - 0.01;
-  if (d > maxR) { _ikD.multiplyScalar(maxR / d); d = maxR; _ikT.copy(_ikS).add(_ikD); }
   if (d < 0.05) return _ikT;
   _ikD.multiplyScalar(1 / d);
+  // 팔 길이보다 멀면 고무줄처럼 늘어남 (손은 절대 안 떨어짐)
+  const a0 = arm.upperLen, b0 = arm.foreLen;
+  let a = a0, b = b0, s = 1;
+  if (d > a0 + b0) {
+    s = Math.min(d / (a0 + b0), 4);
+    a *= s; b *= s;
+  }
+  arm.shoulder.scale.set(1, s, 1);
+  arm.elbow.scale.set(1, s, 1);
   // 굽힘 평면: 아래+바깥 방향 폴
   root.getWorldQuaternion(_ikQ);
   _ikP.set(arm.sideSign, -1, 0).normalize().applyQuaternion(_ikQ);
   _ikP.addScaledVector(_ikD, -_ikP.dot(_ikD)).normalize();
-  const a = arm.upperLen, b = arm.foreLen;
   const cosA = THREE.MathUtils.clamp((a * a + d * d - b * b) / (2 * a * d), -1, 1);
   const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
   _ikE.copy(_ikS).addScaledVector(_ikD, a * cosA).addScaledVector(_ikP, a * sinA);

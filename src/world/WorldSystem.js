@@ -541,6 +541,17 @@ export class WorldSystem {
           h.player.vel.z += (p.vel.z - h.player.vel.z) * couple;
         }
         this.#stepProp(p, dt);
+        // 든 물건은 몸 밖으로 (관통 금지): 홀더 몸통을 고체로 취급
+        for (const h of p.holds) {
+          const hx = p.pos.x - h.player.pos.x, hz = p.pos.z - h.player.pos.z;
+          const dy = p.pos.y - (h.player.pos.y + 0.9);
+          const hd = Math.hypot(hx, hz), hmin = p.half + 0.34;
+          if (hd < hmin && hd > 0.001 && Math.abs(dy) < 1.2) {
+            const push = hmin - hd;
+            p.pos.x += (hx / hd) * push;
+            p.pos.z += (hz / hd) * push;
+          }
+        }
         this.#groundProp(p, dt, true);
         p.owner = net.selfKey;
       } else if (p.owner === net.selfKey) {
@@ -700,19 +711,30 @@ export class WorldSystem {
     _v1.set(p.pos.x - human.pos.x, 0, p.pos.z - human.pos.z);
     const d = _v1.length(), minD = p.half + Config.playerRadius;
     const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
-    if (d < minD && d > 0.001 && overlapY) {
+    if (d >= minD || d <= 0.001 || !overlapY) return;
+    _v1.normalize();
+    // 질량 분할: 가벼우면 물체가 밀리고, 무거우면 몸이 밀려남 (몸 70kg 기준)
+    // 접근 속도에 비례한 가벼운 쿵 (탄성 0.4, 상한 2.5) — 몸으로 툭 쳐도 가볍게 날아가지 않음
+    const m = p.mass ?? 10, pm = PLAYER_MASS;
+    const push = (minD - d) * 8;
+    const relVx = human.vel.x - p.vel.x, relVz = human.vel.z - p.vel.z;
+    const approach = Math.max(0, relVx * _v1.x + relVz * _v1.z);
+    const kick = Math.min(approach * 0.4, 2.5) * (pm / (pm + m));
+    _prePush.copy(p.pos);
+    p.pos.addScaledVector(_v1, push * 0.016 * (pm / (pm + m)));
+    p.vel.addScaledVector(_v1, kick);
+    human.pos.addScaledVector(_v1, -push * 0.016 * (m / (pm + m)));
+    // 물체가 못 움직였으면(벽에 낌) 몸이 밀려남 — 끼인 물체는 고체
+    this.collideProp(p, _prePush);
+    _v1.set(p.pos.x - human.pos.x, 0, human.pos.z - human.pos.z);
+    const d2 = _v1.length();
+    if (d2 < minD && d2 > 0.001) {
       _v1.normalize();
-      // 질량 분할: 가벼우면 물체가 밀리고, 무거우면 몸이 밀려남 (몸 70kg 기준)
-      const m = p.mass ?? 10, pm = PLAYER_MASS;
-      const push = (minD - d) * 8;
-      const hsp = Math.hypot(human.vel.x, human.vel.z);
-      p.pos.addScaledVector(_v1, push * 0.016 * (pm / (pm + m)));
-      p.vel.addScaledVector(_v1, (push * 0.35 + hsp * 0.06) * (pm / (pm + m)));
-      human.pos.addScaledVector(_v1, -push * 0.016 * (m / (pm + m)));
-      if (p.owner !== this.ctx.get('net').selfKey) {
-        this.#takeOwnership(p);
-        this.ctx.get('net')?.claimProp(p);
-      }
+      human.pos.addScaledVector(_v1, -(minD - d2));
+    }
+    if (p.owner !== this.ctx.get('net').selfKey) {
+      this.#takeOwnership(p);
+      this.ctx.get('net')?.claimProp(p);
     }
   }
 
@@ -778,4 +800,5 @@ export class WorldSystem {
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const _f = new THREE.Vector3();
 const _sweepPrev = new THREE.Vector3();
+const _prePush = new THREE.Vector3();
 const _zero = new THREE.Vector3();

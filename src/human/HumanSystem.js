@@ -156,7 +156,8 @@ export class HumanSystem {
     if (moving) {
       const targetYaw = Math.atan2(wx, wz) + Math.PI; // 모델 정면 -Z 보정
       this.yaw = dampAngle(this.yaw, targetYaw, this.overhead ? 7 : 12, dt);
-      const acc = (this.grounded ? C.accel : C.accel * C.airControl) * damp;
+      // 낚아채는 중이면 가속도도 함께 죽음 (헛발질 방지: 다리는 실제 속도만큼만)
+      const acc = (this.grounded ? C.accel : C.accel * C.airControl) * damp * (1 - 0.7 * this.grabStrain);
       this.vel.x += wx * acc * dt;
       this.vel.z += wz * acc * dt;
     } else if (this.grounded) {
@@ -235,12 +236,18 @@ export class HumanSystem {
       }
     }
 
-    // --- 적분 + 충돌 ---
+    // --- 적분 + 충돌 (빠르면 나눠서: 벽 터널링 방지) ---
     const wasGrounded = this.grounded, fallV = this.vel.y;
-    this.pos.x += this.vel.x * dt;
-    this.pos.z += this.vel.z * dt;
-    this.pos.y += this.vel.y * dt;
-    const col = world.collidePlayer(this.pos, this.vel, dt);
+    const hspd = Math.hypot(this.vel.x, this.vel.z);
+    const hsteps = hspd * dt > 0.2 ? 2 : 1;
+    let col = { grounded: false, ride: null };
+    for (let i = 0; i < hsteps; i++) {
+      this.pos.x += this.vel.x * (dt / hsteps);
+      this.pos.z += this.vel.z * (dt / hsteps);
+      this.pos.y += this.vel.y * (dt / hsteps);
+      col = world.collidePlayer(this.pos, this.vel, dt / hsteps);
+      if (col.grounded) break;
+    }
     this.grounded = col.grounded;
     if (!wasGrounded && this.grounded && fallV < -9) ctx.events.emit(EV.LAND);
     // 무빙 발판에 올라탔으면 같이 이동
