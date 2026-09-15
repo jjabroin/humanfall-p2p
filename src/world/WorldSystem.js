@@ -349,8 +349,21 @@ export class WorldSystem {
     }
     return best;
   }
-  groundAt(x, z, feetY) {
-    return this.solidAt(x, z, feetY)?.top ?? null;
+  // 설 수 있는 최고면 (지형+프롭). ride는 무빙 발판에서만.
+  standAt(x, z, feetY, ignoreProp = null) {
+    const hit = this.solidAt(x, z, feetY);
+    let top = hit?.top ?? null;
+    let ride = null;
+    if (hit) ride = hit.mover ?? null;
+    for (const p of this.props) {
+      if (p === ignoreProp) continue;
+      if (Math.abs(p.vel.y) > 4) continue;
+      const t = p.pos.y + p.half;
+      if (Math.abs(x - p.pos.x) < p.half + 0.15 && Math.abs(z - p.pos.z) < p.half + 0.15) {
+        if (t <= feetY + Config.stepHeight && (top === null || t > top)) { top = t; ride = null; }
+      }
+    }
+    return top === null ? null : { top, ride };
   }
 
   padAt(pos) {
@@ -378,15 +391,15 @@ export class WorldSystem {
         else { pos.z = s.z1 + r; vel.z = Math.max(0, vel.z); }
       }
     }
-    // 착지
-    const hit = this.solidAt(pos.x, pos.z, pos.y + 0.3);
+    // 착지 (지형 + 프롭 위)
+    const hit = this.standAt(pos.x, pos.z, pos.y + 0.3);
     const g = hit?.top ?? null;
     if (g !== null && pos.y <= g + 0.02 && vel.y <= 0.01) {
       pos.y = g; vel.y = 0; grounded = true;
     } else if (g !== null && pos.y < g) {
       pos.y = g; vel.y = 0; grounded = true;
     }
-    return { grounded, ride: grounded && hit?.mover ? hit.mover : null };
+    return { grounded, ride: grounded ? hit?.ride ?? null : null };
   }
 
   nearClimbWall(p, dist) {
@@ -398,6 +411,29 @@ export class WorldSystem {
       if (d < dist) return w;
     }
     return null;
+  }
+
+  // 잡을 수 있는 표면점: 클라임벽 전체 + 지형의 옆면/윗모서리/밑면
+  // (윗면 한가운데는 제외 — 바닥을 잡는 건 무의미). 무빙 발판은 제외.
+  grabSurface(hand, maxDist) {
+    let bx = 0, by = 0, bz = 0, bestD = maxDist;
+    let found = false;
+    const considerBox = (x0, x1, y0, y1, z0, z1) => {
+      const px = THREE.MathUtils.clamp(hand.x, x0, x1);
+      const py = THREE.MathUtils.clamp(hand.y, y0, y1);
+      const pz = THREE.MathUtils.clamp(hand.z, z0, z1);
+      const topInner = Math.abs(py - y1) < 0.12
+        && px > x0 + 0.35 && px < x1 - 0.35 && pz > z0 + 0.35 && pz < z1 - 0.35;
+      if (topInner) return;
+      const d = Math.hypot(hand.x - px, hand.y - py, hand.z - pz);
+      if (d < bestD) { bestD = d; bx = px; by = py; bz = pz; found = true; }
+    };
+    for (const w of this.climbWalls) considerBox(w.x0, w.x1, w.y0, w.y1, w.z0, w.z1);
+    for (const s of this.solids) {
+      if (s.mover) continue;
+      considerBox(s.x0, s.x1, s.bottom, s.top, s.z0, s.z1);
+    }
+    return found ? { x: bx, y: by, z: bz } : null;
   }
 
   checkGoal(pos) {
@@ -520,13 +556,14 @@ export class WorldSystem {
     const travel = p.vel.length() * dt;
     const steps = travel > p.half ? 4 : travel > p.half * 0.5 ? 2 : 1;
     for (let i = 0; i < steps; i++) {
+      _sweepPrev.copy(p.pos);
       p.pos.addScaledVector(p.vel, dt / steps);
-      this.collideProp(p);
+      this.collideProp(p, _sweepPrev);
     }
   }
 
   #groundProp(p, dt, held) {
-    const g = this.groundAt(p.pos.x, p.pos.z, p.pos.y);
+    const g = this.standAt(p.pos.x, p.pos.z, p.pos.y, p)?.top ?? null;
     const restY = (g ?? -100) + p.half;
     if (p.pos.y <= restY && p.vel.y <= 0) {
       p.pos.y = restY; p.vel.y = 0;
@@ -538,40 +575,68 @@ export class WorldSystem {
   }
 
   // 프롭 vs 지형 벽밀어내기 (잡고 벽에 박아도 통과 안 함). 리모트 복사본에도 적용.
-  collideProp(p) {
+  collideProp(p, prev) {
     for (const s of this.solids) {
-      this.#pushPropOut(p, s.x0, s.x1, s.z0, s.z1, s.top, s.bottom);
+      this.#pushPropOut(p, prev, s.x0, s.x1, s.z0, s.z1, s.top, s.bottom);
     }
     for (const w of this.climbWalls) {
-      this.#pushPropOut(p, w.x0, w.x1, w.z0, w.z1, w.y1, w.y0);
+      this.#pushPropOut(p, prev, w.x0, w.x1, w.z0, w.z1, w.y1, w.y0);
     }
   }
-  #pushPropOut(p, x0, x1, z0, z1, top, bottom) {
+  // 스윕트 판정: prev(이전 위치)가 밖에 있었으면 들어온 면으로,
+  // 이미 안에 있었으면 침투 최소축으로 밀어냄. 얇은 벽 터널링 방지.
+  #pushPropOut(p, prev, x0, x1, z0, z1, top, bottom) {
     if (p.pos.y - p.half >= top - 0.05 || p.pos.y + p.half <= bottom + 0.05) return;
     const px0 = x0 - p.half, px1 = x1 + p.half;
     const pz0 = z0 - p.half, pz1 = z1 + p.half;
-    if (p.pos.x > px0 && p.pos.x < px1 && p.pos.z > pz0 && p.pos.z < pz1) {
-      const dxl = p.pos.x - px0, dxr = px1 - p.pos.x;
-      const dzl = p.pos.z - pz0, dzr = pz1 - p.pos.z;
-      const m = Math.min(dxl, dxr, dzl, dzr);
-      if (m === dxl) { p.pos.x = px0; if (p.vel.x > 0) p.vel.x = 0; }
-      else if (m === dxr) { p.pos.x = px1; if (p.vel.x < 0) p.vel.x = 0; }
-      else if (m === dzl) { p.pos.z = pz0; if (p.vel.z > 0) p.vel.z = 0; }
-      else { p.pos.z = pz1; if (p.vel.z < 0) p.vel.z = 0; }
+    if (!(p.pos.x > px0 && p.pos.x < px1 && p.pos.z > pz0 && p.pos.z < pz1)) return;
+    if (prev) {
+      const wasOut =
+        prev.x <= px0 || prev.x >= px1 || prev.z <= pz0 || prev.z >= pz1;
+      if (wasOut) {
+        // 들어온 면으로 되돌림 (prev가 밖에 있던 축 중 최소 이동)
+        let best = Infinity, face = 0;
+        const cands = [
+          [Math.abs(p.pos.x - px0), 1], [Math.abs(px1 - p.pos.x), 2],
+          [Math.abs(p.pos.z - pz0), 3], [Math.abs(pz1 - p.pos.z), 4],
+        ];
+        // prev가 밖에 있던 면만 후보
+        const valid = (f) =>
+          (f === 1 && prev.x <= px0) || (f === 2 && prev.x >= px1) ||
+          (f === 3 && prev.z <= pz0) || (f === 4 && prev.z >= pz1);
+        for (const [dd, f] of cands) {
+          if (valid(f) && dd < best) { best = dd; face = f; }
+        }
+        if (face === 1) { p.pos.x = px0; if (p.vel.x > 0) p.vel.x = 0; return; }
+        if (face === 2) { p.pos.x = px1; if (p.vel.x < 0) p.vel.x = 0; return; }
+        if (face === 3) { p.pos.z = pz0; if (p.vel.z > 0) p.vel.z = 0; return; }
+        if (face === 4) { p.pos.z = pz1; if (p.vel.z < 0) p.vel.z = 0; return; }
+      }
     }
+    const dxl = p.pos.x - px0, dxr = px1 - p.pos.x;
+    const dzl = p.pos.z - pz0, dzr = pz1 - p.pos.z;
+    const m = Math.min(dxl, dxr, dzl, dzr);
+    if (m === dxl) { p.pos.x = px0; if (p.vel.x > 0) p.vel.x = 0; }
+    else if (m === dxr) { p.pos.x = px1; if (p.vel.x < 0) p.vel.x = 0; }
+    else if (m === dzl) { p.pos.z = pz0; if (p.vel.z > 0) p.vel.z = 0; }
+    else { p.pos.z = pz1; if (p.vel.z < 0) p.vel.z = 0; }
   }
 
   #pushBy(human, p) {
     if (p.holds.some((h) => h.player === human)) return; // 내가 든 건 몸으로 밀어내지 않음
+    if (human.pos.y > p.pos.y) return; // 위에 올라탄 건 밀어내지 않음 (밟기 허용)
     _v1.set(p.pos.x - human.pos.x, 0, p.pos.z - human.pos.z);
     const d = _v1.length(), minD = p.half + Config.playerRadius;
     const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
     if (d < minD && d > 0.001 && overlapY) {
       _v1.normalize();
+      // 질량 분할: 가벼우면 물체가 밀리고, 무거우면 몸이 밀려남 (몸 70kg 기준)
+      const m = p.mass ?? 10, pm = PLAYER_MASS;
       const push = (minD - d) * 8;
-      p.pos.addScaledVector(_v1, push * 0.016);
-      p.vel.addScaledVector(_v1, push * 0.35);
-      p.vel.addScaledVector(human.vel, 0.06);
+      const hsp = Math.hypot(human.vel.x, human.vel.z);
+      p.pos.addScaledVector(_v1, push * 0.016 * (pm / (pm + m)));
+      p.vel.addScaledVector(_v1, (push * 0.35 + hsp * 0.06) * (pm / (pm + m)));
+      human.pos.addScaledVector(_v1, -push * 0.016 * (m / (pm + m)));
       if (p.owner !== this.ctx.get('net').selfKey) {
         this.#takeOwnership(p);
         this.ctx.get('net')?.claimProp(p);
@@ -626,4 +691,5 @@ export class WorldSystem {
 
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const _f = new THREE.Vector3();
+const _sweepPrev = new THREE.Vector3();
 const _zero = new THREE.Vector3();

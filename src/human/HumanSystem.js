@@ -30,6 +30,7 @@ export class HumanSystem {
 
   #prevGrabL = false;
   #prevGrabR = false;
+  #prevBoth = false;
   #mesh = null;
   #reachL = 0; #reachR = 0;
   #tauntT = 0;
@@ -177,7 +178,7 @@ export class HumanSystem {
     // --- 벽 잡고 오르기 (클라임 벽 근처, 공중, 위를 보며 W) ---
     const wallHold = (this.grabL?.kind === 'wall' || this.grabR?.kind === 'wall');
     if (wallHold && !this.grounded) {
-      this.vel.y = Math.max(this.vel.y, -1.2);       // 미끄러지듯 천천히
+      this.vel.y = THREE.MathUtils.clamp(this.vel.y, -1.2, 3.0); // 매달리기: 천천히 미끄러지고 과상승 방지
       if (cam.pitch < -0.2 && input.move.y > 0.3) this.vel.y = 2.0;  // 위 보고 앞으로 = 오르기
     } else {
       this.vel.y -= C.gravity * dt;
@@ -208,6 +209,25 @@ export class HumanSystem {
       const sw = this.heldMass01, t = ctx.clock.elapsed;
       this.vel.x += Math.sin(t * 5.2) * 4 * sw * dt;
       this.vel.z += Math.cos(t * 4.3) * 4 * sw * dt;
+    }
+
+    // --- 정적 잡기 풀업: 벽/모서리를 잡고 매달리면 몸이 올라감 ---
+    // (움직이지 않는 대상이라 반작용이 전부 몸으로 옴. HFF 등반의 핵심)
+    // 위로 당기는 분력은 전부, 아래로 잡아끄는 분력은 수평만 살짝 (점프 방해 금지)
+    this.chestPos(_c);
+    for (const g of [this.grabL, this.grabR]) {
+      if (g?.kind !== 'wall') continue;
+      _t.set(g.point.x - _c.x, g.point.y - _c.y, g.point.z - _c.z);
+      const d = _t.length();
+      if (d < 0.05) continue;
+      _t.multiplyScalar(Math.min(2200, 900 * d) / d);
+      const k = (dt / 70) * (this.grounded ? 0.2 : 1);
+      if (_t.y > 0) {
+        this.vel.addScaledVector(_t, k);
+      } else {
+        this.vel.x += _t.x * k * 0.3;
+        this.vel.z += _t.z * k * 0.3;
+      }
     }
 
     // --- 적분 + 충돌 ---
@@ -257,6 +277,32 @@ export class HumanSystem {
 
     if (!this.grounded) this.#airTime += dt; else this.#airTime = 0;
 
+    // --- 양손 동시 잡기 (E / 휠클릭 / 🤲) ---
+    const bothHeld = input.both || input.held('both');
+    if (bothHeld && !this.#prevBoth) {
+      for (const side of ['L', 'R']) {
+        const cur = side === 'L' ? this.grabL : this.grabR;
+        if (cur) continue;
+        const found = this.#findGrabTarget(side, ctx);
+        if (found) {
+          found.fromBoth = true;
+          if (side === 'L') this.grabL = found; else this.grabR = found;
+          if (found.kind === 'prop') this.world().setGrab(found.ref, this, side, found.offset);
+        }
+      }
+      if (this.grabL || this.grabR) ctx.events.emit(EV.GRAB, { side: 'B' });
+    } else if (!bothHeld && this.#prevBoth) {
+      // 양손 버튼으로 잡은 것만 해제 (개별 클릭분은 유지)
+      for (const side of ['L', 'R']) {
+        const cur = side === 'L' ? this.grabL : this.grabR;
+        if (!cur || !cur.fromBoth) continue;
+        if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
+        if (side === 'L') this.grabL = null; else this.grabR = null;
+      }
+      ctx.events.emit(EV.THROW);
+    }
+    this.#prevBoth = bothHeld;
+
     // --- 잡기 엣지 처리 ---
     this.#edgeGrab('L', input.grabL, ctx, dt);
     this.#edgeGrab('R', input.grabR, ctx, dt);
@@ -295,27 +341,20 @@ export class HumanSystem {
         ctx.events.emit(EV.GRAB, { side });
       }
     } else if (!held && cur) {
-      if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
-      if (side === 'L') this.grabL = null; else this.grabR = null;
-      ctx.events.emit(EV.THROW);
-    }
-    // 손이 어깨 반경을 벗어나면 미끄러짐 (자연스러운 놓침). 8m 이상은 강제 해제.
-    if (cur && cur.kind !== 'wall') {
-      const tp = this.#grabPoint(cur, _t);
-      const dx = tp.x - this.pos.x, dy = tp.y - (this.pos.y + 1.24), dz = tp.z - this.pos.z;
-      const d = Math.hypot(dx, dy, dz);
-      if (d > 8) {
+      // 양손 모드로 잡은 건 양손 버튼이 관리 (개별 해제는 양손 해제 때만)
+      const bothActive = ctx.input.both || ctx.input.held('both');
+      if (!(cur.fromBoth && bothActive)) {
         if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
         if (side === 'L') this.grabL = null; else this.grabR = null;
-      } else if (d > 0.95) {
-        cur.slipT = (cur.slipT ?? 0) + dt;
-        if (cur.slipT > 0.4) {
-          if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
-          if (side === 'L') this.grabL = null; else this.grabR = null;
-          ctx.events.emit(EV.THROW);
-        }
-      } else {
-        cur.slipT = 0;
+        ctx.events.emit(EV.THROW);
+      }
+    }
+    // 손이 어깨 반경을 벗어나도 절대 놓치지 않음 (버튼을 놓을 때만 해제). 8m 이상은 강제 해제.
+    if (cur && cur.kind !== 'wall') {
+      const tp = this.#grabPoint(cur, _t);
+      if (tp.distanceToSquared(this.pos) > 64) {
+        if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
+        if (side === 'L') this.grabL = null; else this.grabR = null;
       }
     }
     if (cur?.kind === 'player' && _t.copy(cur.ref.pos).sub(this.pos).lengthSq() > 144) {
@@ -359,9 +398,9 @@ export class HumanSystem {
         best = { kind: 'player', ref: r, offset: new THREE.Vector3(), slipT: 0 };
       }
     }
-    // 클라임 벽: 손 근처 판정 (유효거리 1.4m)
-    const wall = world.nearClimbWall(_h, 1.5);
-    if (wall && !best) best = { kind: 'wall', ref: wall, point: _h.clone(), slipT: 0 };
+    // 표면 잡기 (벽 전체 + 섬 모서리/옆면): 손 근처 판정
+    const surf = world.grabSurface(_h, 1.5);
+    if (surf && !best) best = { kind: 'wall', ref: null, point: new THREE.Vector3(surf.x, surf.y, surf.z), slipT: 0 };
     if (best?.kind === 'player') {
       best.offset.set(best.ref.pos.x - _h.x, (best.ref.pos.y + 1.2) - _h.y, best.ref.pos.z - _h.z);
     }

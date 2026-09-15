@@ -8,7 +8,8 @@ const DEADZONE = 0.22;
 const KEYMAP = {
   KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right',
   Space: 'jump', ShiftLeft: 'sprint', ShiftRight: 'sprint',
-  KeyE: 'taunt', Enter: 'jump',
+  KeyE: 'both',
+  KeyT: 'taunt', Enter: 'jump',
 };
 const KEY_LOOK = {
   ArrowLeft: [1, 0], ArrowRight: [-1, 0],
@@ -27,6 +28,7 @@ export class Input {
   #el = null;
   grabL = false;                // 왼손 홀드
   grabR = false;                // 오른손 홀드
+  both = false;                 // 양손 동시 잡기 홀드
 
   attach(el, events) {
     this.#el = el;
@@ -61,10 +63,12 @@ export class Input {
       if (!this.#locked) { el.requestPointerLock?.(); return; }
       if (e.button === 0) this.grabL = true;
       if (e.button === 2) this.grabR = true;
+      if (e.button === 1) { this.both = true; e.preventDefault(); }
     });
     addEventListener('mouseup', (e) => {
       if (e.button === 0) this.grabL = false;
       if (e.button === 2) this.grabR = false;
+      if (e.button === 1) this.both = false;
     });
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('wheel', (e) => { this.zoom += Math.sign(e.deltaY); }, { passive: true });
@@ -177,13 +181,14 @@ export class Input {
     bind('tJump', () => this.setAction?.('jump', true), () => this.setAction?.('jump', false));
     bind('tGrabL', () => { this.grabL = true; }, () => { this.grabL = false; });
     bind('tGrabR', () => { this.grabR = true; }, () => { this.grabR = false; });
+    bind('tBoth', () => { this.both = true; }, () => { this.both = false; });
   }
 
   get pointerLocked() { return this.#locked; }
   releaseAll() {
     this.#down.clear();
     for (const a of this.#actions.values()) { a.held = false; a.queue.length = 0; }
-    this.move.set(0, 0); this.grabL = this.grabR = false;
+    this.move.set(0, 0); this.grabL = this.grabR = this.both = false;
   }
   held(n) { return this.#actions.get(n)?.held ?? false; }
   consume(n) {
@@ -231,5 +236,6 @@ export class Input {
     this.setAction?.('jump', p(0));
     this.setAction?.('sprint', p(10));
     this.grabL = p(6) || p(2); this.grabR = p(7) || p(3);
+    this.both = p(5);
   }
 }
