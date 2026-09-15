@@ -414,11 +414,8 @@ export class WorldSystem {
     prop.remote = false;
     prop.syncTarget = null;
   }
-  setGrab(prop, player, side) {
-    player.handPos(side, _v1);
-    const dist = _v1.distanceTo(prop.pos);
-    // 로프 길이: 잡은 순간 거리 (짧게는 0.6, 길게는 1.8). 들고 있는 동안 서서히 감아당김.
-    prop.holds.push({ player, side, rope: THREE.MathUtils.clamp(dist, 0.35, 1.8) });
+  setGrab(prop, player, side, offset) {
+    prop.holds.push({ player, side, offset: offset ? offset.clone() : new THREE.Vector3(), age: 0, lastF: 0 });
     this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
   }
@@ -461,28 +458,31 @@ export class WorldSystem {
         continue;
       }
       if (p.holds.length > 0) {
-        // 로프 잡기: 늘어지면 힘 없음(자석 금지). 팽팽해져야 당겨지고,
-        // 손이 높이 올라가야(위를 봐야) 들림. 감아당기며 끌어옴.
-        // 반작용으로 드는 놈도 당겨짐 (작용-반작용).
+        // HFF식 잡기: 손은 물체 표면에 붙고(렌더는 IK), 절차적 손 목표점과의
+        // 차이만큼 힘을 줌. 위를 볼수록 수직 힘 허용(들어올림), 평소엔 끌기.
+        // 몸도 반작용으로 당겨져서 함께 느리게 움직임.
         _f.set(0, 0, 0);
-        const dampC = Math.sqrt(GRAB_K * p.mass); // 임계감쇠의 절반 (끌리되 출렁임은 적게)
+        const dampC = Math.sqrt(GRAB_K * p.mass);
+        const pitch = ctx.get('camera').pitch;
+        const gate = THREE.MathUtils.clamp((-pitch - 0.05) / 0.35, 0.12, 1);
         for (const h of p.holds) {
-          h.player.handPos(h.side, _v1);
-          _v2.copy(_v1); _v2.y -= p.half * 0.3;
-          _v3.copy(p.pos).sub(_v2);
+          h.age = (h.age ?? 0) + dt;
+          const grip = Math.min(1, h.age / 0.25); // 잡은 직후 0.25초간 서서히 (낚아채기 방지)
+          h.player.desiredHand(h.side, _v1, pitch);
+          _v2.copy(p.pos).add(h.offset);   // 붙은 표면점
+          _v3.copy(_v1).sub(_v2);          // 표면점 → 목표점
           const dist = _v3.length();
-          // 평소엔 천천히 감아당기고, 번쩍 모드(위를 봄)엔 빨리 감아 들어올림
-          const reel = h.player.lifting ? 3.0 : 0.4;
-          h.rope = Math.max(0.35, h.rope - reel * dt);
-          if (dist > h.rope && dist > 0.001) {
-            // 번쩍 모드(위를 봄): 힘 1.5배
-            const fmax = HAND_FMAX * (h.player.lifting ? 1.5 : 1);
-            // 로프 방향(손→물체)의 반대 = 물체를 손 쪽으로 당김
-            _v3.multiplyScalar(-Math.min(fmax, (dist - h.rope) * GRAB_K) / dist);
+          const fmax = HAND_FMAX * (h.player.lifting ? 1.5 : 1) * grip;
+          if (dist > 0.02 && fmax > 1) {
+            _v3.multiplyScalar(Math.min(fmax, dist * GRAB_K) / dist);
             _v3.addScaledVector(p.vel, -dampC);
+            if (_v3.y > 0) _v3.y = Math.min(_v3.y, fmax * gate); // 들어올리기 게이트
             if (_v3.length() > fmax) _v3.setLength(fmax);
+            h.lastF = _v3.length();
             _f.add(_v3);
             h.player.vel.addScaledVector(_v3, -dt / PLAYER_MASS);
+          } else {
+            h.lastF = 0;
           }
         }
         p.vel.addScaledVector(_f, dt / p.mass);
@@ -492,11 +492,10 @@ export class WorldSystem {
         p.owner = net.selfKey;
       } else if (p.owner === net.selfKey) {
         p.vel.y -= Config.gravity * dt;
-        p.pos.addScaledVector(p.vel, dt);
         // 플레이어에게 밀림
         this.#pushBy(human, p);
         for (const r of net.remotes()) this.#pushByRemote(r, p);
-        // 벽 + 바닥
+        // 벽 + 바닥 (서브스텝 적분 포함)
         this.#stepProp(p, dt);
         this.#groundProp(p, dt, false);
       }
@@ -504,9 +503,22 @@ export class WorldSystem {
     }
   }
 
+  // 특정 플레이어가 잡기로 가하는 힘 비율 (0~1, 몸 감속/기울기용)
+  strainOf(player) {
+    let f = 0, n = 0;
+    for (const p of this.props) {
+      for (const h of p.holds) {
+        if (h.player === player) { f = Math.max(f, h.lastF ?? 0); n++; }
+      }
+    }
+    if (!n) return 0;
+    return THREE.MathUtils.clamp(f / HAND_FMAX, 0, 1);
+  }
+
   // 빠른 물체는 나눠서 적분+충돌 (얇은 벽 터널링 방지)
   #stepProp(p, dt) {
-    const steps = p.vel.length() * dt > p.half * 0.5 ? 2 : 1;
+    const travel = p.vel.length() * dt;
+    const steps = travel > p.half ? 4 : travel > p.half * 0.5 ? 2 : 1;
     for (let i = 0; i < steps; i++) {
       p.pos.addScaledVector(p.vel, dt / steps);
       this.collideProp(p);

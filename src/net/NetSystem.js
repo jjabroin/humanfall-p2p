@@ -340,6 +340,7 @@ export class NetSystem {
   update(dt, ctx) {
     const now = performance.now();
     const k = 1 - Math.exp(-12 * dt);
+    const world = ctx.get('world');
     for (const [id, r] of this.peers) {
       if (now - r.lastRx > 8000 && r.name !== '???') { this.#removePeer(id); continue; }
       // 데드레코닝: 마지막 속도로 예측한 지점으로 보간 (지연 체감 감소)
@@ -347,6 +348,8 @@ export class NetSystem {
       _pv.copy(r.target).addScaledVector(r.vel, age);
       if (r.pos.distanceToSquared(_pv) > 16) r.pos.copy(_pv); // 4m 이상 벌어지면 스냅
       else r.pos.lerp(_pv, k);
+      // 리모트 아바타도 벽/바닥 충돌 (벽 통과 잔상 방지)
+      world.collidePlayer(r.pos, r.vel, dt);
       let d = (r.targetYaw - r.yaw) % (Math.PI * 2);
       if (d > Math.PI) d -= Math.PI * 2;
       if (d < -Math.PI) d += Math.PI * 2;
@@ -357,22 +360,28 @@ export class NetSystem {
       applyHumanPose(r.mesh, {
         walkPhase: r.walkPhase, speed01: r.speed01, airborne: r.airborne,
         reachL: (r.grab & 1) ? 1 : 0, reachR: (r.grab & 2) ? 1 : 0,
-        lookPitch: r.lookPitch, taunt: false, load: 0, overhead: 0,
+        lookPitch: r.lookPitch, taunt: false, load: 0, overhead: 0, pull: 0,
       }, dt, ctx.clock.elapsed);
     }
-    // 리모트 프롭 보간 (속도 예측 포함) + 벽 충돌로 벽 통과 방지
-    const world = ctx.get('world');
+    // 리모트 프롭: 경로 추적 (초당 최대 10m씩 목표를 향해, 벽 충돌 포함)
+    // 직선 보간은 모서리를 뚫고 지나가지만, 경로 추적은 벽에 걸림
     for (const p of world.props) {
       if (p.remote && p.syncTarget) {
         const age = Math.min(0.5, (now - (p.syncT ?? now)) / 1000);
         _pv.copy(p.syncTarget);
         if (p.syncVel) _pv.addScaledVector(p.syncVel, age);
-        if (p.pos.distanceToSquared(_pv) > 16) p.pos.copy(_pv);
-        else p.pos.lerp(_pv, 1 - Math.exp(-12 * dt));
-        world.collideProp(p);
+        const d2 = p.pos.distanceToSquared(_pv);
+        if (d2 > 36) p.pos.copy(_pv); // 6m 이상은 스냅
+        else if (d2 > 0.000001) {
+          _nv.copy(_pv).sub(p.pos);
+          const step = Math.min(Math.sqrt(d2), 10 * dt);
+          p.pos.addScaledVector(_nv, step / Math.sqrt(d2));
+          world.collideProp(p);
+        }
         p.mesh.position.copy(p.pos);
       }
     }
   }
 }
 const _pv = new THREE.Vector3();
+const _nv = new THREE.Vector3();

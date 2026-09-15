@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Config } from '../core/Config.js';
 import { EV } from '../core/events.js';
-import { createHumanMesh, applyHumanPose, handWorld } from './HumanFactory.js';
+import { createHumanMesh, applyHumanPose, handWorld, solveArmIK } from './HumanFactory.js';
 
 // 로컬 플레이어: 말랑 걷기 + 양손 잡기 + 매달리기/올라타기.
 // 물리 충돌 해결은 WorldSystem.collidePlayer에 위임.
@@ -20,6 +20,7 @@ export class HumanSystem {
   wins = 0;
   heldMass01 = 0;   // 든 무게 (0~1)
   armStrain = 0;    // 손당 상대 하중 (0~1, 팔 처짐용)
+  grabStrain = 0;   // 실제 힘 발휘율 (0~1, 감속/뒤젖힘용)
   lifting = false;  // 위를 보며 번쩍 드는 중
   overhead = false; // 머리 위로 번쩍
   respawnPoint = null;   // { x,y,z,yaw } — 체크포인트가 갱신
@@ -66,6 +67,18 @@ export class HumanSystem {
   }
 
   chestPos(out) { return out.set(this.pos.x, this.pos.y + 1.25, this.pos.z); }
+  // 절차적 손 목표점: 가슴 앞 + 시선上下. 실제 손(IK)은 잡은 점에 붙고, 이 점과의 차이가 힘/당김을 만듦.
+  desiredHand(side, out, pitch) {
+    const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw);
+    const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw); // 우측
+    const s = side === 'L' ? -1 : 1;
+    out.set(
+      this.pos.x + fx * 0.55 + rx * s * 0.18,
+      this.pos.y + 1.25 + 0.1 - pitch * 0.9,
+      this.pos.z + fz * 0.55 + rz * s * 0.18
+    );
+    return out;
+  }
   dbgHand(side) {
     const v = new THREE.Vector3();
     this.handPos(side, v);
@@ -121,6 +134,8 @@ export class HumanSystem {
     this.heldMass01 = Math.min(1, heldMass / 30);
     this.armStrain = hands > 0 ? THREE.MathUtils.clamp((heldMass / hands - 8) / 20, 0, 1) : 0;
     this.overhead = overhead;
+    // 실제 힘 발휘율 (지난 틱): 무거운 걸 낚아채면 몸이 함께 느려지고 뒤로 젖혀짐
+    this.grabStrain = world.strainOf(this);
     // 위를 보며 잡고 있으면 번쩍 모드 (팔 최대 + 힘 1.5배)
     this.lifting = (this.grabL?.kind === 'prop' || this.grabR?.kind === 'prop') && cam.pitch < -0.2;
 
@@ -133,7 +148,9 @@ export class HumanSystem {
     const wx = wish.x * cos + wish.z * sin;
     const wz = -wish.x * sin + wish.z * cos;
     const moving = wish.lengthSq() > 0.001;
-    const maxSp = (input.held('sprint') ? C.sprintSpeed : C.walkSpeed) * (1 - 0.25 * this.heldMass01);
+    // 무거운 걸 낚아채면 몸이 함께 느려짐 (몸+물체가 한 단위로)
+    const maxSp = (input.held('sprint') ? C.sprintSpeed : C.walkSpeed)
+      * (1 - 0.25 * this.heldMass01) * (1 - 0.6 * this.grabStrain);
 
     if (moving) {
       const targetYaw = Math.atan2(wx, wz) + Math.PI; // 모델 정면 -Z 보정
@@ -241,8 +258,8 @@ export class HumanSystem {
     if (!this.grounded) this.#airTime += dt; else this.#airTime = 0;
 
     // --- 잡기 엣지 처리 ---
-    this.#edgeGrab('L', input.grabL, ctx);
-    this.#edgeGrab('R', input.grabR, ctx);
+    this.#edgeGrab('L', input.grabL, ctx, dt);
+    this.#edgeGrab('R', input.grabR, ctx, dt);
     this.#prevGrabL = input.grabL; this.#prevGrabR = input.grabR;
 
     // --- 걷기 위상 ---
@@ -267,14 +284,14 @@ export class HumanSystem {
     this.#tauntT = Math.max(0, this.#tauntT - dt);
   }
 
-  #edgeGrab(side, held, ctx) {
+  #edgeGrab(side, held, ctx, dt) {
     const cur = side === 'L' ? this.grabL : this.grabR;
     const prev = side === 'L' ? this.#prevGrabL : this.#prevGrabR;
     if (held && !prev && !cur) {
       const found = this.#findGrabTarget(side, ctx);
       if (found) {
         if (side === 'L') this.grabL = found; else this.grabR = found;
-        if (found.kind === 'prop') this.world().setGrab(found.ref, this, side);
+        if (found.kind === 'prop') this.world().setGrab(found.ref, this, side, found.offset);
         ctx.events.emit(EV.GRAB, { side });
       }
     } else if (!held && cur) {
@@ -282,36 +299,72 @@ export class HumanSystem {
       if (side === 'L') this.grabL = null; else this.grabR = null;
       ctx.events.emit(EV.THROW);
     }
-    // 잡은 대상이 멀어지면 자동 해제
-    if (cur?.kind === 'prop' && cur.ref.pos.distanceToSquared(this.pos) > 16) {
-      this.world().releaseGrab(cur.ref, this, side);
-      if (side === 'L') this.grabL = null; else this.grabR = null;
+    // 손이 어깨 반경을 벗어나면 미끄러짐 (자연스러운 놓침). 8m 이상은 강제 해제.
+    if (cur && cur.kind !== 'wall') {
+      const tp = this.#grabPoint(cur, _t);
+      const dx = tp.x - this.pos.x, dy = tp.y - (this.pos.y + 1.24), dz = tp.z - this.pos.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d > 8) {
+        if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
+        if (side === 'L') this.grabL = null; else this.grabR = null;
+      } else if (d > 0.95) {
+        cur.slipT = (cur.slipT ?? 0) + dt;
+        if (cur.slipT > 0.4) {
+          if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
+          if (side === 'L') this.grabL = null; else this.grabR = null;
+          ctx.events.emit(EV.THROW);
+        }
+      } else {
+        cur.slipT = 0;
+      }
     }
-    if (cur?.kind === 'player' && _t.copy(cur.ref.pos).sub(this.pos).lengthSq() > 12) {
+    if (cur?.kind === 'player' && _t.copy(cur.ref.pos).sub(this.pos).lengthSq() > 144) {
       if (side === 'L') this.grabL = null; else this.grabR = null;
     }
   }
 
+  // 잡은 점 월드좌표 (IK 목표 + 힘 계산용)
+  #grabPoint(g, out) {
+    if (g.kind === 'prop') return out.copy(g.ref.pos).add(g.offset);
+    if (g.kind === 'player') return out.set(g.ref.pos.x, g.ref.pos.y + 1.2, g.ref.pos.z);
+    return out.copy(g.point);
+  }
+
   #findGrabTarget(side, ctx) {
     const world = this.world(), net = this.net();
+    const pitch = ctx.get('camera')?.pitch ?? 0;
+    this.desiredHand(side, _h, pitch); // 손이 닿는 범위 기준
     this.chestPos(_c);
+    // HFF식 짧은 리치: 가슴 반경 1.25m (자석 금지)
     const C = Config;
-    let best = null, bestD = C.reach;
+    let best = null, bestD = 1.25;
 
     for (const p of world.props) {
       if (p.heldByOther) continue; // 남이 든 건 못 잡음 (손이 꽉 참)
       const d = _t.copy(p.pos).sub(_c).length();
-      if (d < bestD) { bestD = d; best = { kind: 'prop', ref: p, offset: new THREE.Vector3() }; }
+      if (d < bestD) {
+        bestD = d;
+        // 잡은 표면점 (물체 기준 오프셋, 회전 없음이라 상수): 손에서 가장 가까운 면
+        const ox = THREE.MathUtils.clamp(_h.x - p.pos.x, -p.half, p.half);
+        const oy = THREE.MathUtils.clamp(_h.y - p.pos.y, -p.half, p.half);
+        const oz = THREE.MathUtils.clamp(_h.z - p.pos.z, -p.half, p.half);
+        best = { kind: 'prop', ref: p, offset: new THREE.Vector3(ox, oy, oz), slipT: 0 };
+      }
     }
     for (const r of net?.remotes() ?? []) {
       _t.set(r.pos.x - _c.x, (r.pos.y + 1.2) - _c.y, r.pos.z - _c.z);
       const d = _t.length();
-      if (d < 2.3 && d < bestD + 0.4) { bestD = d - 0.4; best = { kind: 'player', ref: r, offset: new THREE.Vector3() }; }
+      if (d < 2.0 && d < bestD + 0.4) {
+        bestD = d - 0.4;
+        best = { kind: 'player', ref: r, offset: new THREE.Vector3(), slipT: 0 };
+      }
     }
     // 클라임 벽: 손 근처 판정 (유효거리 1.4m)
-    this.handPos(side, _h);
     const wall = world.nearClimbWall(_h, 1.5);
-    if (wall && !best) best = { kind: 'wall', ref: wall, offset: new THREE.Vector3() };
+    if (wall && !best) best = { kind: 'wall', ref: wall, point: _h.clone(), slipT: 0 };
+    if (best?.kind === 'player') {
+      best.offset.set(best.ref.pos.x - _h.x, (best.ref.pos.y + 1.2) - _h.y, best.ref.pos.z - _h.z);
+    }
     return best;
   }
 
@@ -345,34 +398,17 @@ export class HumanSystem {
       load: this.heldMass01,
       strain: this.armStrain,
       heave: this.lifting ? 1 : 0,
+      pull: this.grabStrain,
       overhead: this.overhead ? 1 : 0,
     }, dt, ctx.clock.elapsed);
-    // 잡은 물체로 팔 조준 (손이 물체에 붙는 느낌)
-    this.#aimArm('L', this.grabL);
-    this.#aimArm('R', this.grabR);
+    // 잡은 손은 IK로 물체 표면에 고정 (벽 잡기도 포함)
+    for (const [g, side] of [[this.grabL, 'L'], [this.grabR, 'R']]) {
+      if (!g) continue;
+      const arm = side === 'L' ? m.armL : m.armR;
+      this.#grabPoint(g, _c);
+      solveArmIK(arm, m.root, _c);
+    }
     this.#updateTethers();
-  }
-
-  #aimArm(side, grab) {
-    if (!grab || grab.kind === 'wall') return;
-    if (this.lifting) return; // 번쩍 모드: 팔은 위로 쭉, 물체가 따라옴
-    const arm = side === 'L' ? this.#mesh.armL : this.#mesh.armR;
-    if (grab.kind === 'prop') _c.copy(grab.ref.pos);
-    else _c.set(grab.ref.pos.x, grab.ref.pos.y + 1.2, grab.ref.pos.z);
-    // 늘어난 정도: 손에 붙으면(가벼움) 기본 들기 포즈, 과신장(무거워서 끌림)일 때만 물체를 조준
-    this.handPos(side, _h);
-    const anchorY = _h.y - (grab.kind === 'prop' ? grab.ref.half * 0.3 : 0);
-    const stretch = Math.hypot(_c.x - _h.x, _c.y - anchorY, _c.z - _h.z);
-    const blend = THREE.MathUtils.clamp((stretch - 0.8) / 1.2, 0, 1);
-    if (blend <= 0.01) return;
-    arm.shoulder.updateWorldMatrix(true, false);
-    _c.copy(grab.kind === 'prop' ? grab.ref.pos : _t.set(grab.ref.pos.x, grab.ref.pos.y + 1.2, grab.ref.pos.z));
-    arm.shoulder.worldToLocal(_c);
-    // 팔은 -Y로 늘어짐, 정면 -Z: 아래=0, 앞=+90°, 위로 쭉=+180°
-    const aimPitch = THREE.MathUtils.clamp(Math.atan2(-_c.z, -_c.y), -0.3, 2.7);
-    arm.shoulder.rotation.x += (aimPitch - arm.shoulder.rotation.x) * 0.6 * blend;
-    const aimRoll = THREE.MathUtils.clamp(_c.x * 1.2, -0.5, 0.5);
-    arm.shoulder.rotation.z += (aimRoll - arm.shoulder.rotation.z) * 0.6 * blend;
   }
 
   // 잡기 테더선: 내 손→잡은 친구, 잡은 놈→나

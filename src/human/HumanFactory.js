@@ -47,19 +47,29 @@ export function createHumanMesh({ suit = '#f2f3f5' } = {}) {
     headG.add(eye);
   }
 
-  // 팔: 짧고 굵음 (어깨 피벗), 손은 몸통과 같은 색 미튼
-  const armGeo = new THREE.CapsuleGeometry(0.095, 0.26, 6, 12);
-  const mkArm = (x) => {
-    const g = new THREE.Group();
-    g.position.set(x, 0.68, 0);
-    const m = new THREE.Mesh(armGeo, suitMat);
-    m.position.y = -0.2; m.castShadow = true;
+  // 팔: 투본 IK (어깨→팔꿈치→손). 손은 항상 어깨 반경 안에 붙음.
+  const upperLen = 0.34, foreLen = 0.36;
+  const armGeo = new THREE.CapsuleGeometry(0.095, upperLen - 0.1, 6, 12);
+  const foreGeo = new THREE.CapsuleGeometry(0.08, foreLen - 0.1, 6, 12);
+  const mkArm = (x, sideSign) => {
+    const shoulder = new THREE.Group();
+    shoulder.position.set(x, 0.68, 0);
+    const upper = new THREE.Mesh(armGeo, suitMat);
+    upper.position.y = -upperLen / 2; upper.castShadow = true;
+    shoulder.add(upper);
+    const elbow = new THREE.Group();
+    elbow.position.y = -upperLen;
+    shoulder.add(elbow);
+    const fore = new THREE.Mesh(foreGeo, suitMat);
+    fore.position.y = -foreLen / 2; fore.castShadow = true;
+    elbow.add(fore);
     const hand = new THREE.Mesh(new THREE.SphereGeometry(0.115, 12, 10), suitMat);
-    hand.position.y = -0.42; hand.castShadow = true;
-    g.add(m, hand); torso.add(g);
-    return { shoulder: g, hand };
+    hand.position.y = -foreLen - 0.03; hand.castShadow = true;
+    elbow.add(hand);
+    torso.add(shoulder);
+    return { shoulder, elbow, hand, sideSign, upperLen, foreLen };
   };
-  const armL = mkArm(-0.4), armR = mkArm(0.4);
+  const armL = mkArm(-0.4, -1), armR = mkArm(0.4, 1);
 
   // 이름표 스프라이트
   const label = makeLabel('');
@@ -96,7 +106,8 @@ export function applyHumanPose(r, s, dt, time) {
   const load = s.load ?? 0, oh = s.overhead ?? 0;
   // 블롭 특유의 좌우 출렁임 + 앞으로 기울기
   // 무거운 걸 번쩍 들면 뒤로 젖혀지고 크게 휘청 (무게중심 상승)
-  r.torso.rotation.x = sp * 0.18 + (s.airborne ? -0.1 : 0) - oh * 0.18 - load * 0.06;
+  // 낚아채는 중(pull)은 뒤로 젖혀지며 버팀
+  r.torso.rotation.x = sp * 0.18 + (s.airborne ? -0.1 : 0) - oh * 0.18 - load * 0.06 - (s.pull ?? 0) * 0.2;
   r.torso.rotation.z = Math.sin(wp) * 0.09 * Math.min(1, sp + 0.25)
     + Math.sin(time * 5.2) * 0.14 * oh
     + (s.taunt ? Math.sin(time * 7) * 0.16 : 0);
@@ -120,6 +131,45 @@ function poseArm(arm, swing, reach, pitch, time, strain = 0, heave = 0, seed = 0
   // rotation.x + = 앞으로 (모델 정면 -Z). 뻗으면 앞쪽으로. 위를 보면 더 높이.
   arm.shoulder.rotation.x = swing * (1 - reach) + (1.3 - pitch * 1.0) * reach * droop + wob + tremble;
   arm.shoulder.rotation.z = (1 - reach) * 0.15 + wob;
+  arm.elbow.rotation.x = -0.3 * (1 - reach); // 평소엔 팔꿈치 살짝 굽힘
+}
+
+const _ikS = new THREE.Vector3(), _ikT = new THREE.Vector3(), _ikD = new THREE.Vector3();
+const _ikP = new THREE.Vector3(), _ikE = new THREE.Vector3(), _ikQ = new THREE.Quaternion(), _ikQ2 = new THREE.Quaternion();
+const _ikDown = new THREE.Vector3(0, -1, 0);
+
+/**
+ * 투본 IK: 어깨→팔꿈치→손. 손은 항상 어깨 반경 안에 붙어서 렌더링.
+ * target이 손이 닿는 위치(월드).returns 손이 실제 닿은 위치.
+ */
+export function solveArmIK(arm, root, targetWorld) {
+  arm.shoulder.updateWorldMatrix(true, false);
+  _ikS.setFromMatrixPosition(arm.shoulder.matrixWorld);
+  _ikT.copy(targetWorld);
+  _ikD.copy(_ikT).sub(_ikS);
+  let d = _ikD.length();
+  const maxR = arm.upperLen + arm.foreLen - 0.01;
+  if (d > maxR) { _ikD.multiplyScalar(maxR / d); d = maxR; _ikT.copy(_ikS).add(_ikD); }
+  if (d < 0.05) return _ikT;
+  _ikD.multiplyScalar(1 / d);
+  // 굽힘 평면: 아래+바깥 방향 폴
+  root.getWorldQuaternion(_ikQ);
+  _ikP.set(arm.sideSign, -1, 0).normalize().applyQuaternion(_ikQ);
+  _ikP.addScaledVector(_ikD, -_ikP.dot(_ikD)).normalize();
+  const a = arm.upperLen, b = arm.foreLen;
+  const cosA = THREE.MathUtils.clamp((a * a + d * d - b * b) / (2 * a * d), -1, 1);
+  const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+  _ikE.copy(_ikS).addScaledVector(_ikD, a * cosA).addScaledVector(_ikP, a * sinA);
+  // 어깨→팔꿈치
+  arm.shoulder.parent.getWorldQuaternion(_ikQ).invert();
+  _ikP.copy(_ikE).sub(_ikS).normalize();
+  arm.shoulder.quaternion.copy(_ikQ.multiply(_ikQ2.setFromUnitVectors(_ikDown, _ikP)));
+  // 팔꿈치→손
+  arm.elbow.updateWorldMatrix(true, false);
+  arm.elbow.parent.getWorldQuaternion(_ikQ).invert();
+  _ikP.copy(_ikT).sub(_ikE).normalize();
+  arm.elbow.quaternion.copy(_ikQ.multiply(_ikQ2.setFromUnitVectors(_ikDown, _ikP)));
+  return _ikT;
 }
 
 export function handWorld(arm, out) {
