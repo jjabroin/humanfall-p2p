@@ -19,6 +19,8 @@ export class HumanSystem {
   color = '#ff8c42';
   wins = 0;
   heldMass01 = 0;   // 든 무게 (0~1)
+  armStrain = 0;    // 손당 상대 하중 (0~1, 팔 처짐용)
+  lifting = false;  // 위를 보며 번쩍 드는 중
   overhead = false; // 머리 위로 번쩍
   respawnPoint = null;   // { x,y,z,yaw } — 체크포인트가 갱신
   cpIndex = -1;
@@ -105,15 +107,22 @@ export class HumanSystem {
     const damp = grabber ? 0.45 : 1; // 잡히면 조작 반감
 
     // --- 든 무게 집계 (무게중심 효과용) ---
-    let heldMass = 0, overhead = false;
+    // strain: 손 하나당 상대 하중 (가벼우면 팔 쭉, 무거우면 팔 처짐+떨림)
+    let heldMass = 0, overhead = false, hands = 0;
     for (const g of [this.grabL, this.grabR]) {
       if (g?.kind === 'prop') {
         heldMass += g.ref.mass ?? 8;
-        if (g.ref.pos.y > this.pos.y + 0.75) overhead = true;
+        hands++;
+        if (g.ref.pos.y > this.pos.y + 0.5) overhead = true;
+      } else if (g?.kind === 'player') {
+        hands++;
       }
     }
     this.heldMass01 = Math.min(1, heldMass / 30);
+    this.armStrain = hands > 0 ? THREE.MathUtils.clamp((heldMass / hands - 8) / 20, 0, 1) : 0;
     this.overhead = overhead;
+    // 위를 보며 잡고 있으면 번쩍 모드 (팔 최대 + 힘 1.5배)
+    this.lifting = (this.grabL?.kind === 'prop' || this.grabR?.kind === 'prop') && cam.pitch < -0.2;
 
     // --- 이동 (카메라 기준) ---
     const wish = new THREE.Vector3(input.move.x, 0, -input.move.y);
@@ -334,6 +343,8 @@ export class HumanSystem {
       lookPitch: ctx.get('camera')?.pitch ?? 0,
       taunt: this.#tauntT > 0,
       load: this.heldMass01,
+      strain: this.armStrain,
+      heave: this.lifting ? 1 : 0,
       overhead: this.overhead ? 1 : 0,
     }, dt, ctx.clock.elapsed);
     // 잡은 물체로 팔 조준 (손이 물체에 붙는 느낌)
@@ -344,6 +355,7 @@ export class HumanSystem {
 
   #aimArm(side, grab) {
     if (!grab || grab.kind === 'wall') return;
+    if (this.lifting) return; // 번쩍 모드: 팔은 위로 쭉, 물체가 따라옴
     const arm = side === 'L' ? this.#mesh.armL : this.#mesh.armR;
     if (grab.kind === 'prop') _c.copy(grab.ref.pos);
     else _c.set(grab.ref.pos.x, grab.ref.pos.y + 1.2, grab.ref.pos.z);

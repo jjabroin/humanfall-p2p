@@ -108,14 +108,17 @@ export function applyHumanPose(r, s, dt, time) {
   const swing = s.airborne ? 0.7 : Math.min(1, sp) * 0.9;
   r.legL.rotation.x = Math.sin(wp) * swing;
   r.legR.rotation.x = -Math.sin(wp) * swing;
-  poseArm(r.armL, -Math.sin(wp) * 0.7 * sp, s.reachL, s.lookPitch, time);
-  poseArm(r.armR, Math.sin(wp) * 0.7 * sp, s.reachR, s.lookPitch, time);
+  poseArm(r.armL, -Math.sin(wp) * 0.7 * sp, s.reachL, s.lookPitch, time, s.strain ?? 0, s.heave ?? 0, 0);
+  poseArm(r.armR, Math.sin(wp) * 0.7 * sp, s.reachR, s.lookPitch, time, s.strain ?? 0, s.heave ?? 0, 1.7);
 }
 
-function poseArm(arm, swing, reach, pitch, time) {
-  const wob = Math.sin(time * 3.1) * 0.04;
+function poseArm(arm, swing, reach, pitch, time, strain = 0, heave = 0, seed = 0) {
+  const wob = Math.sin(time * 3.1 + seed) * 0.04;
+  // 무거우면 팔에 힘이 풀림: 덜 올라가고 부들부들 떨림. 번쩍 모드면 힘줘서 쭉.
+  const droop = (1 - 0.45 * Math.min(1, strain)) * (1 - heave) + heave * 0.92;
+  const tremble = Math.sin(time * 31 + seed * 3) * 0.035 * Math.min(1, strain) * (1 - heave * 0.5);
   // rotation.x + = 앞으로 (모델 정면 -Z). 뻗으면 앞쪽으로. 위를 보면 더 높이.
-  arm.shoulder.rotation.x = swing * (1 - reach) + (1.3 - pitch * 1.0) * reach + wob;
+  arm.shoulder.rotation.x = swing * (1 - reach) + (1.3 - pitch * 1.0) * reach * droop + wob + tremble;
   arm.shoulder.rotation.z = (1 - reach) * 0.15 + wob;
 }
 

@@ -357,10 +357,10 @@ export class NetSystem {
       applyHumanPose(r.mesh, {
         walkPhase: r.walkPhase, speed01: r.speed01, airborne: r.airborne,
         reachL: (r.grab & 1) ? 1 : 0, reachR: (r.grab & 2) ? 1 : 0,
-        lookPitch: r.lookPitch, taunt: false,
+        lookPitch: r.lookPitch, taunt: false, load: 0, overhead: 0,
       }, dt, ctx.clock.elapsed);
     }
-    // 리모트 프롭 보간 (속도 예측 포함)
+    // 리모트 프롭 보간 (속도 예측 포함) + 벽 충돌로 벽 통과 방지
     const world = ctx.get('world');
     for (const p of world.props) {
       if (p.remote && p.syncTarget) {
@@ -369,6 +369,7 @@ export class NetSystem {
         if (p.syncVel) _pv.addScaledVector(p.syncVel, age);
         if (p.pos.distanceToSquared(_pv) > 16) p.pos.copy(_pv);
         else p.pos.lerp(_pv, 1 - Math.exp(-12 * dt));
+        world.collideProp(p);
         p.mesh.position.copy(p.pos);
       }
     }

@@ -5,8 +5,8 @@ import { EV } from '../core/events.js';
 // 떠있는 섬 레벨 + 잡기/밀기 가능한 프롭 + 골인 링.
 // 물리는 커스텀 경량 물리 (stickfight처럼 외부 물리엔진 없음).
 // 잡기는 힘 기반: 손 스프링(힘 상한) vs 무게. 가벼우면 들리고, 무거우면 못 들고 끌려감.
-const HAND_FMAX = 300;   // 손 하나가 낼 수 있는 최대 힘 (공 1손 336N에는 못 미침)
-const GRAB_K = 900;      // 잡기 스프링 강성 (가벼운 건 손 높이에서도 들리게)
+const HAND_FMAX = 360;   // 손 하나가 낼 수 있는 최대 힘 (공 한 손 432에는 못 미침)
+const GRAB_K = 1000;      // 잡기 스프링 강성 (가벼운 건 손 높이에서도 들리게)
 const PLAYER_MASS = 70;
 export class WorldSystem {
   solids = [];     // { x0,x1,z0,z1,top,bottom,mover|null,mesh }
@@ -80,12 +80,12 @@ export class WorldSystem {
     this.#climbWall(scene, -8.6, -8.4, 21.5, 26.5, 0, 1.9);
 
     // 프롭: 크레이트 3 + 공 1 + 옆섬 크레이트 1 + 무거운 큰 크레이트 1
-    this.#crate(scene, -2.5, 0.45, 20, 0.9, 8);
-    this.#crate(scene, 2.5, 0.45, 22, 0.9, 8);
-    this.#crate(scene, 0.5, 0.35, 19, 0.7, 5);
+    this.#crate(scene, -2.5, 0.45, 20, 0.9, 10);
+    this.#crate(scene, 2.5, 0.45, 22, 0.9, 10);
+    this.#crate(scene, 0.5, 0.35, 19, 0.7, 8);
     this.#ball(scene, -1.5, 0.6, 23);
-    this.#crate(scene, -11, 1.25, 24, 0.9, 8);
-    this.#crate(scene, 3.2, 0.65, 19.5, 1.3, 45);
+    this.#crate(scene, -11, 1.25, 24, 0.9, 10);
+    this.#crate(scene, 3.2, 0.65, 19.5, 1.3, 60);
 
     // 골인 링
     const ring = new THREE.Mesh(
@@ -335,7 +335,7 @@ export class WorldSystem {
     scene.add(mesh);
     this.props.push({
       id: 'ball', mesh, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(),
-      half: 0.6, round: true, mass: 14, holds: [], grabbedBy: null, owner: 'local', remote: false,
+      half: 0.6, round: true, mass: 18, holds: [], grabbedBy: null, owner: 'local', remote: false,
     });
   }
 
@@ -415,7 +415,10 @@ export class WorldSystem {
     prop.syncTarget = null;
   }
   setGrab(prop, player, side) {
-    prop.holds.push({ player, side });
+    player.handPos(side, _v1);
+    const dist = _v1.distanceTo(prop.pos);
+    // 로프 길이: 잡은 순간 거리 (짧게는 0.6, 길게는 1.8). 들고 있는 동안 서서히 감아당김.
+    prop.holds.push({ player, side, rope: THREE.MathUtils.clamp(dist, 0.35, 1.8) });
     this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
   }
@@ -458,24 +461,33 @@ export class WorldSystem {
         continue;
       }
       if (p.holds.length > 0) {
-        // 힘 기반 잡기: 앵커(손 아래)는 고정, 물체가 손으로 딸려옴.
-        // 가벼우면 들리고, 무거우면 스프링이 포화되어 땅에 끌림.
+        // 로프 잡기: 늘어지면 힘 없음(자석 금지). 팽팽해져야 당겨지고,
+        // 손이 높이 올라가야(위를 봐야) 들림. 감아당기며 끌어옴.
         // 반작용으로 드는 놈도 당겨짐 (작용-반작용).
         _f.set(0, 0, 0);
-        const dampC = 2 * Math.sqrt(GRAB_K * p.mass);
+        const dampC = Math.sqrt(GRAB_K * p.mass); // 임계감쇠의 절반 (끌리되 출렁임은 적게)
         for (const h of p.holds) {
           h.player.handPos(h.side, _v1);
           _v2.copy(_v1); _v2.y -= p.half * 0.3;
-          _v3.copy(_v2).sub(p.pos).multiplyScalar(GRAB_K);
-          _v3.addScaledVector(p.vel, -dampC);
-          if (_v3.length() > HAND_FMAX) _v3.setLength(HAND_FMAX);
-          _f.add(_v3);
-          h.player.vel.addScaledVector(_v3, -dt / PLAYER_MASS);
+          _v3.copy(p.pos).sub(_v2);
+          const dist = _v3.length();
+          // 평소엔 천천히 감아당기고, 번쩍 모드(위를 봄)엔 빨리 감아 들어올림
+          const reel = h.player.lifting ? 3.0 : 0.4;
+          h.rope = Math.max(0.35, h.rope - reel * dt);
+          if (dist > h.rope && dist > 0.001) {
+            // 번쩍 모드(위를 봄): 힘 1.5배
+            const fmax = HAND_FMAX * (h.player.lifting ? 1.5 : 1);
+            // 로프 방향(손→물체)의 반대 = 물체를 손 쪽으로 당김
+            _v3.multiplyScalar(-Math.min(fmax, (dist - h.rope) * GRAB_K) / dist);
+            _v3.addScaledVector(p.vel, -dampC);
+            if (_v3.length() > fmax) _v3.setLength(fmax);
+            _f.add(_v3);
+            h.player.vel.addScaledVector(_v3, -dt / PLAYER_MASS);
+          }
         }
         p.vel.addScaledVector(_f, dt / p.mass);
         p.vel.y -= Config.gravity * dt;
-        p.pos.addScaledVector(p.vel, dt);
-        this.#collideProp(p);
+        this.#stepProp(p, dt);
         this.#groundProp(p, dt, true);
         p.owner = net.selfKey;
       } else if (p.owner === net.selfKey) {
@@ -485,10 +497,19 @@ export class WorldSystem {
         this.#pushBy(human, p);
         for (const r of net.remotes()) this.#pushByRemote(r, p);
         // 벽 + 바닥
-        this.#collideProp(p);
+        this.#stepProp(p, dt);
         this.#groundProp(p, dt, false);
       }
       p.mesh.position.copy(p.pos);
+    }
+  }
+
+  // 빠른 물체는 나눠서 적분+충돌 (얇은 벽 터널링 방지)
+  #stepProp(p, dt) {
+    const steps = p.vel.length() * dt > p.half * 0.5 ? 2 : 1;
+    for (let i = 0; i < steps; i++) {
+      p.pos.addScaledVector(p.vel, dt / steps);
+      this.collideProp(p);
     }
   }
 
@@ -504,21 +525,27 @@ export class WorldSystem {
     }
   }
 
-  // 프롭 vs 지형 벽밀어내기 (잡고 벽에 박아도 통과 안 함)
-  #collideProp(p) {
+  // 프롭 vs 지형 벽밀어내기 (잡고 벽에 박아도 통과 안 함). 리모트 복사본에도 적용.
+  collideProp(p) {
     for (const s of this.solids) {
-      if (p.pos.y - p.half >= s.top - 0.05 || p.pos.y + p.half <= s.bottom + 0.05) continue;
-      const px0 = s.x0 - p.half, px1 = s.x1 + p.half;
-      const pz0 = s.z0 - p.half, pz1 = s.z1 + p.half;
-      if (p.pos.x > px0 && p.pos.x < px1 && p.pos.z > pz0 && p.pos.z < pz1) {
-        const dxl = p.pos.x - px0, dxr = px1 - p.pos.x;
-        const dzl = p.pos.z - pz0, dzr = pz1 - p.pos.z;
-        const m = Math.min(dxl, dxr, dzl, dzr);
-        if (m === dxl) { p.pos.x = px0; if (p.vel.x > 0) p.vel.x = 0; }
-        else if (m === dxr) { p.pos.x = px1; if (p.vel.x < 0) p.vel.x = 0; }
-        else if (m === dzl) { p.pos.z = pz0; if (p.vel.z > 0) p.vel.z = 0; }
-        else { p.pos.z = pz1; if (p.vel.z < 0) p.vel.z = 0; }
-      }
+      this.#pushPropOut(p, s.x0, s.x1, s.z0, s.z1, s.top, s.bottom);
+    }
+    for (const w of this.climbWalls) {
+      this.#pushPropOut(p, w.x0, w.x1, w.z0, w.z1, w.y1, w.y0);
+    }
+  }
+  #pushPropOut(p, x0, x1, z0, z1, top, bottom) {
+    if (p.pos.y - p.half >= top - 0.05 || p.pos.y + p.half <= bottom + 0.05) return;
+    const px0 = x0 - p.half, px1 = x1 + p.half;
+    const pz0 = z0 - p.half, pz1 = z1 + p.half;
+    if (p.pos.x > px0 && p.pos.x < px1 && p.pos.z > pz0 && p.pos.z < pz1) {
+      const dxl = p.pos.x - px0, dxr = px1 - p.pos.x;
+      const dzl = p.pos.z - pz0, dzr = pz1 - p.pos.z;
+      const m = Math.min(dxl, dxr, dzl, dzr);
+      if (m === dxl) { p.pos.x = px0; if (p.vel.x > 0) p.vel.x = 0; }
+      else if (m === dxr) { p.pos.x = px1; if (p.vel.x < 0) p.vel.x = 0; }
+      else if (m === dzl) { p.pos.z = pz0; if (p.vel.z > 0) p.vel.z = 0; }
+      else { p.pos.z = pz1; if (p.vel.z < 0) p.vel.z = 0; }
     }
   }
 
