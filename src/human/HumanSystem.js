@@ -279,6 +279,29 @@ export class HumanSystem {
         this.pos.z += (dz / d) * push;
       }
     }
+    // 팽팽한 줄: 몸이 물체에서 멀어지면, 물체 속도에 연동 (함께 기어가듯 움직임).
+    // 무거울수록 몸이 물체 속도에 묶임. 가벼우면 제한 없음.
+    // 힘을 다 쓰고도 물체가 안 오면(풀 스트레인) 몸도 거의 못 빠져나감.
+    for (const g of [this.grabL, this.grabR]) {
+      if (g?.kind !== 'prop') continue;
+      const dx = this.pos.x - g.ref.pos.x, dz = this.pos.z - g.ref.pos.z;
+      const d = Math.hypot(dx, dz);
+      const slack = 0.9 + g.ref.half;
+      if (d > slack && d > 0.001) {
+        const m = g.ref.mass ?? 10;
+        const s = THREE.MathUtils.clamp(m / 40, 0, 1);
+        const nx = dx / d, nz = dz / d;
+        const outward = this.vel.x * nx + this.vel.z * nz;
+        const objOut = g.ref.vel.x * nx + g.ref.vel.z * nz;
+        const margin = 0.8 * (1 - this.grabStrain * 0.9);
+        const maxOut = objOut + margin;
+        if (outward > maxOut) {
+          const kill = (outward - maxOut) * s;
+          this.vel.x -= nx * kill;
+          this.vel.z -= nz * kill;
+        }
+      }
+    }
     // 리모트 프롭에 겹치면 플레이어가 밀려남
     world.pushPlayerFromRemoteProps(this);
 

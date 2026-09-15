@@ -52,7 +52,7 @@ export class WorldSystem {
     this.#island(scene, 0, 12, 2.6, 7, 0);        // 다리
     this.#island(scene, 0, 21, 13, 12, 0);        // 박스 섬
     this.#island(scene, 0, 30.5, 3.2, 5, 0);      // 점프 발판 (틈 2m)
-    this.#island(scene, 0, 39, 11, 12, 0);        // 타워 섬
+    this.#island(scene, 0, 39.75, 11, 13.5, 0);   // 타워 섬 (클라임벽 밑 틈새 메움)
     this.#island(scene, 0, 50.5, 9, 8, 1.4);      // CP1 휴식 단상 (높이 1.4)
     this.#island(scene, -11, 24, 5, 5, 0.8);      // 옆 숨은 섬
 
@@ -507,13 +507,21 @@ export class WorldSystem {
           h.age = (h.age ?? 0) + dt;
           const grip = Math.min(1, h.age / 0.25); // 잡은 직후 0.25초간 서서히 (낚아채기 방지)
           h.player.desiredHand(h.side, _v1, pitch);
+          // 앵커 속도 (상대 감쇠용: 함께 움직이면 감쇠 없음)
+          let avx = 0, avy = 0, avz = 0;
+          if (h.ax !== undefined) {
+            avx = (_v1.x - h.ax) / dt; avy = (_v1.y - h.ay) / dt; avz = (_v1.z - h.az) / dt;
+          }
+          h.ax = _v1.x; h.ay = _v1.y; h.az = _v1.z;
           _v2.copy(p.pos).add(h.offset);   // 붙은 표면점
           _v3.copy(_v1).sub(_v2);          // 표면점 → 목표점
           const dist = _v3.length();
           const fmax = HAND_FMAX * (h.player.lifting ? 1.5 : 1) * grip;
           if (dist > 0.02 && fmax > 1) {
             _v3.multiplyScalar(Math.min(fmax, dist * GRAB_K) / dist);
-            _v3.addScaledVector(p.vel, -dampC);
+            _v3.x -= (p.vel.x - avx) * dampC;
+            _v3.y -= (p.vel.y - avy) * dampC;
+            _v3.z -= (p.vel.z - avz) * dampC;
             if (_v3.y > 0) _v3.y = Math.min(_v3.y, fmax * gate); // 들어올리기 게이트
             if (_v3.length() > fmax) _v3.setLength(fmax);
             h.lastF = _v3.length();
@@ -546,9 +554,17 @@ export class WorldSystem {
       }
     }
     // 물체끼리 충돌 (2회 완화): 쌓기/밀기. 위로는 절대 튀지 않음.
+    // 페어 해소 전 위치를 저장 → 해소 후 벽 충돌 (벽 속으로 밀려 들어감 방지)
+    for (const p of this.props) {
+      if (p.remote) continue;
+      p._px = p.pos.x; p._py = p.pos.y; p._pz = p.pos.z;
+    }
     this.#solvePropPairs();
     for (const p of this.props) {
-      if (!p.remote) p.mesh.position.copy(p.pos);
+      if (p.remote) continue;
+      _sweepPrev.set(p._px, p._py, p._pz);
+      this.collideProp(p, _sweepPrev);
+      p.mesh.position.copy(p.pos);
     }
   }
 
