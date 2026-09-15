@@ -93,9 +93,13 @@ function makeLabel(text) {
 // 매 프레임 포즈 적용. s: { walkPhase, speed01, airborne, reachL/R, lookPitch, taunt }
 export function applyHumanPose(r, s, dt, time) {
   const sp = s.speed01, wp = s.walkPhase;
+  const load = s.load ?? 0, oh = s.overhead ?? 0;
   // 블롭 특유의 좌우 출렁임 + 앞으로 기울기
-  r.torso.rotation.x = sp * 0.18 + (s.airborne ? -0.1 : 0);
-  r.torso.rotation.z = Math.sin(wp) * 0.09 * Math.min(1, sp + 0.25) + (s.taunt ? Math.sin(time * 7) * 0.16 : 0);
+  // 무거운 걸 번쩍 들면 뒤로 젖혀지고 크게 휘청 (무게중심 상승)
+  r.torso.rotation.x = sp * 0.18 + (s.airborne ? -0.1 : 0) - oh * 0.18 - load * 0.06;
+  r.torso.rotation.z = Math.sin(wp) * 0.09 * Math.min(1, sp + 0.25)
+    + Math.sin(time * 5.2) * 0.14 * oh
+    + (s.taunt ? Math.sin(time * 7) * 0.16 : 0);
   r.torso.position.y = 0.56 + Math.abs(Math.sin(wp)) * 0.04 * sp;
   r.torso.rotation.y = Math.sin(wp * 0.5) * 0.05 * sp;
   // 얼굴은 시선을 따라 살짝
@@ -110,7 +114,8 @@ export function applyHumanPose(r, s, dt, time) {
 
 function poseArm(arm, swing, reach, pitch, time) {
   const wob = Math.sin(time * 3.1) * 0.04;
-  arm.shoulder.rotation.x = swing * (1 - reach) + (-1.3 + pitch * 0.6) * reach + wob;
+  // rotation.x + = 앞으로 (모델 정면 -Z). 뻗으면 앞쪽으로. 위를 보면 더 높이.
+  arm.shoulder.rotation.x = swing * (1 - reach) + (1.3 - pitch * 1.0) * reach + wob;
   arm.shoulder.rotation.z = (1 - reach) * 0.15 + wob;
 }
 

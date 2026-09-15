@@ -75,7 +75,7 @@ export class NetSystem {
     this.joinedAt = performance.now();
     // 손대지 않은 프롭 소유권 가져오기 (주인 없는 프롭은 아무도 시뮬 안 함)
     for (const p of this.ctx.get('world').props) {
-      if (p.owner !== this.selfKey && !p.grabbedBy) {
+      if (p.owner !== this.selfKey && p.holds.length === 0) {
         p.owner = this.selfKey; p.claimT = Date.now(); p.claimBy = this.selfKey;
         p.remote = false; p.syncTarget = null;
       }
@@ -108,7 +108,7 @@ export class NetSystem {
       p: [prop.pos.x, prop.pos.y, prop.pos.z],
       v: [prop.vel.x, prop.vel.y, prop.vel.z],
       ct: prop.claimT ?? 0, by: prop.claimBy ?? '',
-      h: !!prop.grabbedBy,
+      h: prop.holds.length > 0,
     };
     this.#safeSend(this.#sendProp, msg);
     if (this.#relayOn) this.#relay?.send({ k: 'claim', d: msg });
@@ -166,7 +166,7 @@ export class NetSystem {
     this.claimProp(prop);
   }
   #applyClaim(prop, d, senderId) {
-    if (prop.grabbedBy) { this.#reassert(prop); return false; }
+    if (prop.holds.length) return false; // 내가 잡는 중이면 무시 (핑퐁 방지)
     const nt = d.ct ?? 0, nb = d.by ?? senderId;
     const ot = prop.claimT ?? -1, ob = prop.claimBy ?? '';
     if (nt < ot || (nt === ot && nb <= ob)) {
@@ -182,7 +182,7 @@ export class NetSystem {
     return true;
   }
   #applyPropPos(prop, d, senderId) {
-    if (prop.grabbedBy) return; // 내가 잡는 중이면 내 시뮬이 권위
+    if (prop.holds.length) return; // 내가 잡는 중이면 내 시뮬이 권위
     if (prop.owner === senderId) {
       prop.remote = true;
       if (!prop.syncTarget) prop.syncTarget = new THREE.Vector3();
@@ -236,7 +236,7 @@ export class NetSystem {
     // 잡고 있던 프롭 소유권 회수
     const world = this.ctx.get('world');
     for (const p of world.props) {
-      if (p.owner === peerId) { p.owner = this.selfKey; p.remote = false; }
+      if (p.owner === peerId) { p.owner = this.selfKey; p.remote = false; p.heldByOther = false; p.syncTarget = null; }
     }
     // 날 잡고 있던 손 해제
     const human = this.ctx.get('human');
@@ -256,7 +256,7 @@ export class NetSystem {
   #reclaimOwned() {
     const world = this.ctx.get('world');
     for (const p of world.props) {
-      if (p.owner === this.selfKey && !p.grabbedBy) {
+      if (p.owner === this.selfKey && p.holds.length === 0) {
         p.claimT = Date.now(); p.claimBy = this.selfKey;
         this.claimProp(p);
       }

@@ -4,6 +4,10 @@ import { EV } from '../core/events.js';
 
 // 떠있는 섬 레벨 + 잡기/밀기 가능한 프롭 + 골인 링.
 // 물리는 커스텀 경량 물리 (stickfight처럼 외부 물리엔진 없음).
+// 잡기는 힘 기반: 손 스프링(힘 상한) vs 무게. 가벼우면 들리고, 무거우면 못 들고 끌려감.
+const HAND_FMAX = 300;   // 손 하나가 낼 수 있는 최대 힘 (공 1손 336N에는 못 미침)
+const GRAB_K = 900;      // 잡기 스프링 강성 (가벼운 건 손 높이에서도 들리게)
+const PLAYER_MASS = 70;
 export class WorldSystem {
   solids = [];     // { x0,x1,z0,z1,top,bottom,mover|null,mesh }
   props = [];      // { id, mesh, pos, vel, half, grabbedBy:{player,side}|null, owner, remote }
@@ -75,12 +79,13 @@ export class WorldSystem {
     // 옆섬 오르는 작은 벽
     this.#climbWall(scene, -8.6, -8.4, 21.5, 26.5, 0, 1.9);
 
-    // 프롭: 크레이트 3 + 공 1 + 옆섬 크레이트 1
-    this.#crate(scene, -2.5, 0.45, 20);
-    this.#crate(scene, 2.5, 0.45, 22);
-    this.#crate(scene, 0.5, 0.45, 19, 0.7);
+    // 프롭: 크레이트 3 + 공 1 + 옆섬 크레이트 1 + 무거운 큰 크레이트 1
+    this.#crate(scene, -2.5, 0.45, 20, 0.9, 8);
+    this.#crate(scene, 2.5, 0.45, 22, 0.9, 8);
+    this.#crate(scene, 0.5, 0.35, 19, 0.7, 5);
     this.#ball(scene, -1.5, 0.6, 23);
-    this.#crate(scene, -11, 1.25, 24);
+    this.#crate(scene, -11, 1.25, 24, 0.9, 8);
+    this.#crate(scene, 3.2, 0.65, 19.5, 1.3, 45);
 
     // 골인 링
     const ring = new THREE.Mesh(
@@ -301,10 +306,10 @@ export class WorldSystem {
     this.climbWalls.push({ x0, x1, z0, z1, y0, y1 });
   }
 
-  #crate(scene, x, y, z, s = 0.9) {
+  #crate(scene, x, y, z, s = 0.9, mass = 8) {
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(s, s, s),
-      new THREE.MeshStandardMaterial({ color: '#c98f4e', roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: s > 1 ? '#8f5a2b' : '#c98f4e', roughness: 0.9 })
     );
     mesh.castShadow = mesh.receiveShadow = true;
     // 테두리
@@ -317,7 +322,7 @@ export class WorldSystem {
     this.props.push({
       id: `crate${this.props.length}`, mesh,
       pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(),
-      half: s / 2, grabbedBy: null, owner: 'local', remote: false,
+      half: s / 2, mass, holds: [], grabbedBy: null, owner: 'local', remote: false,
     });
   }
 
@@ -330,7 +335,7 @@ export class WorldSystem {
     scene.add(mesh);
     this.props.push({
       id: 'ball', mesh, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(),
-      half: 0.6, round: true, grabbedBy: null, owner: 'local', remote: false,
+      half: 0.6, round: true, mass: 14, holds: [], grabbedBy: null, owner: 'local', remote: false,
     });
   }
 
@@ -410,20 +415,21 @@ export class WorldSystem {
     prop.syncTarget = null;
   }
   setGrab(prop, player, side) {
-    prop.grabbedBy = { player, side };
+    prop.holds.push({ player, side });
     this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
-    prop.vel.set(0, 0, 0);
   }
-  releaseGrab(prop, player) {
-    if (prop.grabbedBy?.player !== player) return;
+  releaseGrab(prop, player, side) {
+    const i = prop.holds.findIndex((h) => h.player === player && h.side === side);
+    if (i < 0) return;
+    prop.holds.splice(i, 1);
+    if (prop.holds.length > 0) return; // 다른 손이 아직 잡음
     // 놓을 때 손 속도를 물려줘서 던지기 가능
     prop.vel.copy(player.vel);
     prop.vel.y += 2.0;
     const f = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), player.yaw);
     const hs = Math.hypot(player.vel.x, player.vel.z);
     prop.vel.addScaledVector(f, Math.min(hs * 0.6, 3) + Config.throwBoost * 0.5);
-    prop.grabbedBy = null;
     this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
   }
@@ -451,16 +457,26 @@ export class WorldSystem {
         this.#seizeCheck(p, human, net);
         continue;
       }
-      if (p.grabbedBy) {
-        // 잡은 손 위치로 스프링 추종 (강성+감쇠로 흔들림 없이)
-        const holder = p.grabbedBy.player;
-        holder.handPos(p.grabbedBy.side, _v1);
-        _v2.copy(_v1).add(p.grabbedBy.offset ?? _zero);
-        _v3.copy(_v2).sub(p.pos);
-        p.vel.addScaledVector(_v3, 90 * dt);
-        p.vel.multiplyScalar(Math.max(0, 1 - 12 * dt));
-        if (p.vel.lengthSq() > 200) p.vel.setLength(Math.sqrt(200));
+      if (p.holds.length > 0) {
+        // 힘 기반 잡기: 앵커(손 아래)는 고정, 물체가 손으로 딸려옴.
+        // 가벼우면 들리고, 무거우면 스프링이 포화되어 땅에 끌림.
+        // 반작용으로 드는 놈도 당겨짐 (작용-반작용).
+        _f.set(0, 0, 0);
+        const dampC = 2 * Math.sqrt(GRAB_K * p.mass);
+        for (const h of p.holds) {
+          h.player.handPos(h.side, _v1);
+          _v2.copy(_v1); _v2.y -= p.half * 0.3;
+          _v3.copy(_v2).sub(p.pos).multiplyScalar(GRAB_K);
+          _v3.addScaledVector(p.vel, -dampC);
+          if (_v3.length() > HAND_FMAX) _v3.setLength(HAND_FMAX);
+          _f.add(_v3);
+          h.player.vel.addScaledVector(_v3, -dt / PLAYER_MASS);
+        }
+        p.vel.addScaledVector(_f, dt / p.mass);
+        p.vel.y -= Config.gravity * dt;
         p.pos.addScaledVector(p.vel, dt);
+        this.#collideProp(p);
+        this.#groundProp(p, dt, true);
         p.owner = net.selfKey;
       } else if (p.owner === net.selfKey) {
         p.vel.y -= Config.gravity * dt;
@@ -468,22 +484,46 @@ export class WorldSystem {
         // 플레이어에게 밀림
         this.#pushBy(human, p);
         for (const r of net.remotes()) this.#pushByRemote(r, p);
-        // 바닥
-        const g = this.groundAt(p.pos.x, p.pos.z, p.pos.y);
-        const restY = (g ?? -100) + p.half;
-        if (p.pos.y <= restY && p.vel.y <= 0) {
-          p.pos.y = restY; p.vel.y = 0;
-          p.vel.x *= (1 - 6 * dt); p.vel.z *= (1 - 6 * dt);
-        }
-        if (p.pos.y < Config.killY) { // 떨어진 프롭 리스폰
-          p.pos.set(-2.5, 2, 20); p.vel.set(0, 0, 0);
-        }
+        // 벽 + 바닥
+        this.#collideProp(p);
+        this.#groundProp(p, dt, false);
       }
       p.mesh.position.copy(p.pos);
     }
   }
 
+  #groundProp(p, dt, held) {
+    const g = this.groundAt(p.pos.x, p.pos.z, p.pos.y);
+    const restY = (g ?? -100) + p.half;
+    if (p.pos.y <= restY && p.vel.y <= 0) {
+      p.pos.y = restY; p.vel.y = 0;
+      p.vel.x *= (1 - 6 * dt); p.vel.z *= (1 - 6 * dt);
+    }
+    if (!held && p.pos.y < Config.killY) { // 떨어진 프롭 리스폰 (잡은 건 4m 자동해제로 처리)
+      p.pos.set(-2.5, 2, 20); p.vel.set(0, 0, 0);
+    }
+  }
+
+  // 프롭 vs 지형 벽밀어내기 (잡고 벽에 박아도 통과 안 함)
+  #collideProp(p) {
+    for (const s of this.solids) {
+      if (p.pos.y - p.half >= s.top - 0.05 || p.pos.y + p.half <= s.bottom + 0.05) continue;
+      const px0 = s.x0 - p.half, px1 = s.x1 + p.half;
+      const pz0 = s.z0 - p.half, pz1 = s.z1 + p.half;
+      if (p.pos.x > px0 && p.pos.x < px1 && p.pos.z > pz0 && p.pos.z < pz1) {
+        const dxl = p.pos.x - px0, dxr = px1 - p.pos.x;
+        const dzl = p.pos.z - pz0, dzr = pz1 - p.pos.z;
+        const m = Math.min(dxl, dxr, dzl, dzr);
+        if (m === dxl) { p.pos.x = px0; if (p.vel.x > 0) p.vel.x = 0; }
+        else if (m === dxr) { p.pos.x = px1; if (p.vel.x < 0) p.vel.x = 0; }
+        else if (m === dzl) { p.pos.z = pz0; if (p.vel.z > 0) p.vel.z = 0; }
+        else { p.pos.z = pz1; if (p.vel.z < 0) p.vel.z = 0; }
+      }
+    }
+  }
+
   #pushBy(human, p) {
+    if (p.holds.some((h) => h.player === human)) return; // 내가 든 건 몸으로 밀어내지 않음
     _v1.set(p.pos.x - human.pos.x, 0, p.pos.z - human.pos.z);
     const d = _v1.length(), minD = p.half + Config.playerRadius;
     const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
@@ -506,7 +546,7 @@ export class WorldSystem {
     const d = _v1.length();
     const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
     const touching = d < p.half + Config.playerRadius + 0.15 && overlapY;
-    if (touching && !p.touching && !p.grabbedBy && !p.heldByOther && p.owner !== net.selfKey) {
+    if (touching && !p.touching && p.holds.length === 0 && !p.heldByOther && p.owner !== net.selfKey) {
       this.#takeOwnership(p);
       net.claimProp(p);
     }
@@ -546,4 +586,5 @@ export class WorldSystem {
 }
 
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+const _f = new THREE.Vector3();
 const _zero = new THREE.Vector3();

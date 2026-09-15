@@ -13,6 +13,7 @@ export class CameraSystem {
     this.yaw += input.look.x;
     this.pitch = THREE.MathUtils.clamp(this.pitch - input.look.y, -0.9, 1.1);
     this.dist = THREE.MathUtils.clamp(this.dist + input.zoom * 0.6, 2.4, 9);
+    input.look.set(0, 0); // 여기서 소비 (저fps 다중 스텝 중복 적용 방지)
   }
 
   update(dt, ctx) {
@@ -25,9 +26,14 @@ export class CameraSystem {
       _t.y + sp * this.dist,
       _t.z + Math.cos(this.yaw) * cp * this.dist
     );
-    // 카메라가 땅에 묻히지 않게
-    const g = world.groundAt(_o.x, _o.z, _o.y);
-    if (g !== null && _o.y < g + 0.4) _o.y = g + 0.4;
+    // 카메라가 땅에 묻히지 않게 (위를 볼 때 낮아져도 지형 위로)
+    let gy = null;
+    for (const s of world.solids) {
+      if (_o.x > s.x0 && _o.x < s.x1 && _o.z > s.z0 && _o.z < s.z1) {
+        if (gy === null || s.top > gy) gy = s.top;
+      }
+    }
+    if (gy !== null && _o.y < gy + 0.35) _o.y = gy + 0.35;
     ctx.camera.position.lerp(_o, 1 - Math.exp(-14 * dt));
     ctx.camera.lookAt(_t);
     // 전력질주 시 살짝 광각 (속도감)
