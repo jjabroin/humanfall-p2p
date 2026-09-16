@@ -408,7 +408,11 @@ export class WorldSystem {
     const g = hit?.top ?? null;
     const wasAbove = prevY === null || prevY >= (g ?? 0) - 0.15 || !hit?.isProp;
     if (g !== null && pos.y <= g + 0.02 && vel.y <= 0.01 && wasAbove) {
-      pos.y = g; vel.y = 0; grounded = true;
+      // 완만한 오르막은 스르륵 (순간이동 대신)
+      const rise = g - pos.y;
+      if (rise > 0 && rise < 0.4 && vel.y > -3) pos.y += rise * Math.min(1, 15 * dt);
+      else pos.y = g;
+      vel.y = 0; grounded = true;
     } else if (g !== null && pos.y < g && wasAbove) {
       pos.y = g; vel.y = 0; grounded = true;
     }
@@ -623,7 +627,7 @@ export class WorldSystem {
 
   #solvePropPairs() {
     const ps = this.props;
-    for (let iter = 0; iter < 2; iter++) {
+    for (let iter = 0; iter < 3; iter++) {
       for (let i = 0; i < ps.length; i++) {
         const a = ps[i];
         if (a.remote) continue;

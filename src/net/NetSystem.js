@@ -149,6 +149,15 @@ export class NetSystem {
       }
     }
     r.target.set(s.p[0], s.p[1], s.p[2]);
+    // 점프 감지: 타겟이 갑자기 멀리 뛰면(리스폰 등) 스냅, 아니면 보간
+    if (!r.lastTgt) {
+      r.pos.copy(r.target);
+    } else if (r.lastTgt.distanceToSquared(r.target) > 64) {
+      r.pos.copy(r.target);
+      r.vel.set(0, 0, 0);
+    }
+    if (!r.lastTgt) r.lastTgt = new THREE.Vector3();
+    r.lastTgt.copy(r.target);
     if (s.v) r.vel.set(s.v[0], s.v[1], s.v[2]);
     r.rxT = performance.now();
     r.grabTarget = s.t ?? null;   // 이 피어가 잡고 있는 플레이어 이름 (잡기 끌기용)
@@ -177,9 +186,30 @@ export class NetSystem {
     prop.owner = senderId;
     prop.remote = true;
     prop.heldByOther = !!d.h;
-    prop.pos.set(d.p[0], d.p[1], d.p[2]);
-    prop.mesh.position.copy(prop.pos);
+    // 순간이동 금지: lerp 타겟만 갱신 (진짜 순간이동-리스폰 등-은 점프감지가 처리)
+    if (!prop.syncTarget) prop.syncTarget = new THREE.Vector3();
+    if (!prop.syncVel) prop.syncVel = new THREE.Vector3();
+    _pv.set(d.p[0], d.p[1], d.p[2]);
+    this.#routeSyncTarget(prop, _pv);
+    if (d.v) prop.syncVel.set(d.v[0], d.v[1], d.v[2]);
+    prop.syncT = performance.now();
     return true;
+  }
+
+  // 점프 감지: 타겟이 갑자기 멀리 뛰면(리스폰 등) 스냅, 아니면 경로 추적.
+  // 마지막 타겟이 없으면 첫 수신 → 스냅.
+  #routeSyncTarget(prop, target) {
+    if (!prop.lastSync) {
+      prop.pos.copy(target);
+      prop.mesh.position.copy(prop.pos);
+    } else if (prop.lastSync.distanceToSquared(target) > 64) {
+      prop.pos.copy(target);
+      prop.mesh.position.copy(prop.pos);
+    }
+    if (!prop.lastSync) prop.lastSync = new THREE.Vector3();
+    prop.lastSync.copy(target);
+    prop.syncTarget.copy(target);
+    prop.syncT = performance.now();
   }
   #applyPropPos(prop, d, senderId) {
     if (prop.holds.length) return; // 내가 잡는 중이면 내 시뮬이 권위
@@ -344,11 +374,11 @@ export class NetSystem {
     for (const [id, r] of this.peers) {
       if (now - r.lastRx > 8000 && r.name !== '???') { this.#removePeer(id); continue; }
       // 데드레코닝: 마지막 속도로 예측한 지점으로 보간 (지연 체감 감소)
+      // 데드레코닝 + 보간. 순간이동(리스폰 등)은 수신 시 점프감지로 스냅했으므로 여기선 스냅 없음.
       const age = Math.min(0.5, (now - r.rxT) / 1000);
       const py0 = r.pos.y;
       _pv.copy(r.target).addScaledVector(r.vel, age);
-      if (r.pos.distanceToSquared(_pv) > 16) r.pos.copy(_pv); // 4m 이상 벌어지면 스냅
-      else r.pos.lerp(_pv, k);
+      r.pos.lerp(_pv, k);
       // 리모트 아바타도 벽/바닥 충돌 (벽 통과 잔상 방지)
       world.collidePlayer(r.pos, r.vel, dt, py0);
       let d = (r.targetYaw - r.yaw) % (Math.PI * 2);
@@ -365,15 +395,15 @@ export class NetSystem {
       }, dt, ctx.clock.elapsed);
     }
     // 리모트 프롭: 경로 추적 (초당 최대 10m씩 목표를 향해, 벽 충돌 포함)
-    // 직선 보간은 모서리를 뚫고 지나가지만, 경로 추적은 벽에 걸림
+    // 직선 보간은 모서리를 뚫고 지나가지만, 경로 추적은 벽에 걸림.
+    // 순간이동(리스폰 등)은 수신 시 점프감지로 스냅했으므로 여기선 스냅 없음.
     for (const p of world.props) {
       if (p.remote && p.syncTarget) {
         const age = Math.min(0.5, (now - (p.syncT ?? now)) / 1000);
         _pv.copy(p.syncTarget);
         if (p.syncVel) _pv.addScaledVector(p.syncVel, age);
         const d2 = p.pos.distanceToSquared(_pv);
-        if (d2 > 36) p.pos.copy(_pv); // 6m 이상은 스냅
-        else if (d2 > 0.000001) {
+        if (d2 > 0.000001) {
           _nv.copy(p.pos); // prev (스윕트 충돌용)
           _nv2.copy(_pv).sub(p.pos);
           const d = Math.sqrt(d2);
