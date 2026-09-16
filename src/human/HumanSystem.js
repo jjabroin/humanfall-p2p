@@ -231,10 +231,11 @@ export class HumanSystem {
     const hsteps = hspd * dt > 0.2 ? 2 : 1;
     let col = { grounded: false, ride: null };
     for (let i = 0; i < hsteps; i++) {
+      const py0 = this.pos.y;
       this.pos.x += this.vel.x * (dt / hsteps);
       this.pos.z += this.vel.z * (dt / hsteps);
       this.pos.y += this.vel.y * (dt / hsteps);
-      col = world.collidePlayer(this.pos, this.vel, dt / hsteps);
+      col = world.collidePlayer(this.pos, this.vel, dt / hsteps, py0);
       if (col.grounded) break;
     }
     this.grounded = col.grounded;

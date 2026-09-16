@@ -352,20 +352,23 @@ export class WorldSystem {
 
   // 설 수 있는 최고면 (지형+프롭). ride는 무빙 발판에서만.
   // 프롭은 스텝 허용이 작음 (옆에서 부딪히면 위로 순간이동하지 않음)
+  // isProp: 프롭이 이기면 원웨이 발판 (위에서 떨어질 때만 착지)
   standAt(x, z, feetY, ignoreProp = null) {
     const hit = this.solidAt(x, z, feetY);
     let top = hit?.top ?? null;
     let ride = null;
+    let isProp = false;
     if (hit) ride = hit.mover ?? null;
     for (const p of this.props) {
       if (p === ignoreProp) continue;
       if (Math.abs(p.vel.y) > 4) continue;
       const t = p.pos.y + p.half;
-      if (Math.abs(x - p.pos.x) < p.half + 0.15 && Math.abs(z - p.pos.z) < p.half + 0.15) {
-        if (t <= feetY + 0.3 && (top === null || t > top)) { top = t; ride = null; }
-      }
+      const inside = p.round
+        ? (x - p.pos.x) ** 2 + (z - p.pos.z) ** 2 < (p.half + 0.15) ** 2
+        : Math.abs(x - p.pos.x) < p.half + 0.15 && Math.abs(z - p.pos.z) < p.half + 0.15;
+      if (inside && t <= feetY + 0.3 && (top === null || t > top)) { top = t; ride = null; isProp = true; }
     }
-    return top === null ? null : { top, ride };
+    return top === null ? null : { top, ride, isProp };
   }
 
   padAt(pos) {
@@ -376,7 +379,7 @@ export class WorldSystem {
     return null;
   }
 
-  collidePlayer(pos, vel, dt) {
+  collidePlayer(pos, vel, dt, prevY = null) {
     const C = Config, r = C.playerRadius;
     let grounded = false;
     // 수평 벽 밀어내기 (발보다 높은 면)
@@ -393,12 +396,14 @@ export class WorldSystem {
         else { pos.z = s.z1 + r; vel.z = Math.max(0, vel.z); }
       }
     }
-    // 착지 (지형 + 프롭 위)
+    // 착지 (지형 + 프롭 위). 프롭은 원웨이: 이전 틱에 위에 있었을 때만 착지.
+    // 옆에서 부딪히면 스냅 없이 지나침 (질량 분할이 밀어냄).
     const hit = this.standAt(pos.x, pos.z, pos.y + 0.3);
     const g = hit?.top ?? null;
-    if (g !== null && pos.y <= g + 0.02 && vel.y <= 0.01) {
+    const wasAbove = prevY === null || prevY >= (g ?? 0) - 0.15 || !hit?.isProp;
+    if (g !== null && pos.y <= g + 0.02 && vel.y <= 0.01 && wasAbove) {
       pos.y = g; vel.y = 0; grounded = true;
-    } else if (g !== null && pos.y < g) {
+    } else if (g !== null && pos.y < g && wasAbove) {
       pos.y = g; vel.y = 0; grounded = true;
     }
     return { grounded, ride: grounded ? hit?.ride ?? null : null };
@@ -415,18 +420,27 @@ export class WorldSystem {
     return null;
   }
 
-  // 잡을 수 있는 표면점: 클라임벽 전체 + 지형의 옆면/윗모서리/밑면
-  // (윗면 한가운데는 제외 — 바닥을 잡는 건 무의미). 무빙 발판은 제외.
+  // 잡을 수 있는 표면점: 클라임벽 전체 + 지형의 옆면/모서리/밑면/천장.
+  // 바닥 잡기 금지: 윗면은 손이 아래 있을 때만 (밑에서/옆에서 잡기).
+  // 무빙 발판은 제외.
   grabSurface(hand, maxDist) {
     let bx = 0, by = 0, bz = 0, bestD = maxDist;
     let found = false;
+    const C = THREE.MathUtils.clamp;
     const considerBox = (x0, x1, y0, y1, z0, z1) => {
-      const px = THREE.MathUtils.clamp(hand.x, x0, x1);
-      const py = THREE.MathUtils.clamp(hand.y, y0, y1);
-      const pz = THREE.MathUtils.clamp(hand.z, z0, z1);
-      const topInner = Math.abs(py - y1) < 0.12
-        && px > x0 + 0.35 && px < x1 - 0.35 && pz > z0 + 0.35 && pz < z1 - 0.35;
-      if (topInner) return;
+      let px = C(hand.x, x0, x1), py = C(hand.y, y0, y1), pz = C(hand.z, z0, z1);
+      if (px === hand.x && py === hand.y && pz === hand.z) {
+        // 손이 박스 안에 있으면 가장 가까운 면으로
+        const dx = Math.min(hand.x - x0, x1 - hand.x);
+        const dy = Math.min(hand.y - y0, y1 - hand.y);
+        const dz = Math.min(hand.z - z0, hand.z - z1);
+        const m = Math.min(dx, dy, dz);
+        if (m === dx) px = (hand.x - x0 < x1 - hand.x) ? x0 : x1;
+        else if (m === dy) py = (hand.y - y0 < y1 - hand.y) ? y0 : y1;
+        else pz = (hand.z - z0 < z1 - hand.z) ? z0 : z1;
+      }
+      const isTop = Math.abs(py - y1) < 0.12 && px > x0 && px < x1 && pz > z0 && pz < z1;
+      if (isTop && hand.y >= y1 + 0.3) return; // 바닥 잡기 금지
       const d = Math.hypot(hand.x - px, hand.y - py, hand.z - pz);
       if (d < bestD) { bestD = d; bx = px; by = py; bz = pz; found = true; }
     };
@@ -576,6 +590,14 @@ export class WorldSystem {
       _sweepPrev.set(p._px, p._py, p._pz);
       this.collideProp(p, _sweepPrev);
       p.mesh.position.copy(p.pos);
+      // 공은 구른다
+      if (p.round) {
+        const sp = Math.hypot(p.vel.x, p.vel.z);
+        if (sp > 0.1) {
+          _rollAxis.set(p.vel.z, 0, -p.vel.x).normalize();
+          p.mesh.rotateOnWorldAxis(_rollAxis, (sp * dt) / p.half);
+        }
+      }
     }
   }
 
@@ -588,12 +610,52 @@ export class WorldSystem {
         for (let j = i + 1; j < ps.length; j++) {
           const b = ps[j];
           if (b.remote) continue;
+          const ma = a.mass ?? 10, mb = b.mass ?? 10, tot = ma + mb;
+          if (a.round && b.round) {
+            // 구-구
+            const dx = a.pos.x - b.pos.x, dy = a.pos.y - b.pos.y, dz = a.pos.z - b.pos.z;
+            const d = Math.hypot(dx, dy, dz), minD = a.half + b.half;
+            if (d >= minD) continue;
+            const nx = d > 0.0001 ? dx / d : 1, ny = d > 0.0001 ? dy / d : 0, nz = d > 0.0001 ? dz / d : 0;
+            const pen = minD - d;
+            a.pos.x += nx * pen * (mb / tot); a.pos.y += ny * pen * (mb / tot); a.pos.z += nz * pen * (mb / tot);
+            b.pos.x -= nx * pen * (ma / tot); b.pos.y -= ny * pen * (ma / tot); b.pos.z -= nz * pen * (ma / tot);
+            const vn = (a.vel.x - b.vel.x) * nx + (a.vel.y - b.vel.y) * ny + (a.vel.z - b.vel.z) * nz;
+            if (vn < 0) {
+              const jimp = -(1 + 0.3) * vn / (1 / ma + 1 / mb);
+              a.vel.x += nx * jimp / ma; a.vel.y += ny * jimp / ma; a.vel.z += nz * jimp / ma;
+              b.vel.x -= nx * jimp / mb; b.vel.y -= ny * jimp / mb; b.vel.z -= nz * jimp / mb;
+            }
+            continue;
+          }
+          if (a.round || b.round) {
+            // 구-박스: 박스 최근접점 기준
+            const s = a.round ? b : a, o = a.round ? a : b;
+            const sm = a.round ? mb : ma, om = a.round ? ma : mb;
+            const stot = sm + om;
+            const cx = THREE.MathUtils.clamp(o.pos.x, s.pos.x - s.half, s.pos.x + s.half);
+            const cy = THREE.MathUtils.clamp(o.pos.y, s.pos.y - s.half, s.pos.y + s.half);
+            const cz = THREE.MathUtils.clamp(o.pos.z, s.pos.z - s.half, s.pos.z + s.half);
+            const dx = o.pos.x - cx, dy = o.pos.y - cy, dz = o.pos.z - cz;
+            const d = Math.hypot(dx, dy, dz);
+            if (d >= o.half || d <= 0.0001) continue;
+            const nx = dx / d, ny = dy / d, nz = dz / d;
+            const pen = o.half - d;
+            o.pos.x += nx * pen * (sm / stot); o.pos.y += ny * pen * (sm / stot); o.pos.z += nz * pen * (sm / stot);
+            s.pos.x -= nx * pen * (om / stot); s.pos.y -= ny * pen * (om / stot); s.pos.z -= nz * pen * (om / stot);
+            const vn = (o.vel.x - s.vel.x) * nx + (o.vel.y - s.vel.y) * ny + (o.vel.z - s.vel.z) * nz;
+            if (vn < 0) {
+              const jimp = -(1 + 0.1) * vn / (1 / om + 1 / sm);
+              o.vel.x += nx * jimp / om; o.vel.y += ny * jimp / om; o.vel.z += nz * jimp / om;
+              s.vel.x -= nx * jimp / sm; s.vel.y -= ny * jimp / sm; s.vel.z -= nz * jimp / sm;
+            }
+            continue;
+          }
           const ox = (a.half + b.half) - Math.abs(a.pos.x - b.pos.x);
           const oz = (a.half + b.half) - Math.abs(a.pos.z - b.pos.z);
           if (ox <= 0 || oz <= 0) continue;
           const oy = Math.min(a.pos.y + a.half, b.pos.y + b.half) - Math.max(a.pos.y - a.half, b.pos.y - b.half);
           if (oy <= 0) continue;
-          const ma = a.mass ?? 10, mb = b.mass ?? 10, tot = ma + mb;
           if (oy < Math.min(ox, oz) * 0.6) {
             // 위아래로 포개짐: 위를 받침 (y 고정 + 수직속도 동기 + 수평 마찰)
             const top = a.pos.y > b.pos.y ? a : b;
@@ -668,7 +730,36 @@ export class WorldSystem {
   }
   // 스윕트 판정: prev(이전 위치)가 밖에 있었으면 들어온 면으로,
   // 이미 안에 있었으면 침투 최소축으로 밀어냄. 얇은 벽 터널링 방지.
+  // 둥근 프롭은 구 vs 박스로 판정.
   #pushPropOut(p, prev, x0, x1, z0, z1, top, bottom) {
+    if (p.round) {
+      const C = THREE.MathUtils.clamp;
+      const inside = p.pos.x > x0 && p.pos.x < x1 && p.pos.y > bottom && p.pos.y < top && p.pos.z > z0 && p.pos.z < z1;
+      if (!inside) {
+        const cx = C(p.pos.x, x0, x1), cy = C(p.pos.y, bottom, top), cz = C(p.pos.z, z0, z1);
+        const dx = p.pos.x - cx, dy = p.pos.y - cy, dz = p.pos.z - cz;
+        const d = Math.hypot(dx, dy, dz);
+        if (d >= p.half || d <= 0.0001) return;
+        const push = p.half - d + 0.001;
+        const nx = dx / d, ny = dy / d, nz = dz / d;
+        p.pos.x += nx * push; p.pos.y += ny * push; p.pos.z += nz * push;
+        const vn = p.vel.x * nx + p.vel.y * ny + p.vel.z * nz;
+        if (vn < 0) { p.vel.x -= nx * vn; p.vel.y -= ny * vn; p.vel.z -= nz * vn; }
+        return;
+      }
+      // 중심이 박스 안에 박힘: 최소축으로 완전히 밀어냄
+      const dxl = (p.pos.x - x0) + p.half, dxr = (x1 - p.pos.x) + p.half;
+      const dyl = (p.pos.y - bottom) + p.half, dyr = (top - p.pos.y) + p.half;
+      const dzl = (p.pos.z - z0) + p.half, dzr = (z1 - p.pos.z) + p.half;
+      const m = Math.min(dxl, dxr, dyl, dyr, dzl, dzr);
+      if (m === dxl) { p.pos.x = x0 - p.half; if (p.vel.x > 0) p.vel.x = 0; }
+      else if (m === dxr) { p.pos.x = x1 + p.half; if (p.vel.x < 0) p.vel.x = 0; }
+      else if (m === dyl) { p.pos.y = bottom - p.half; if (p.vel.y > 0) p.vel.y = 0; }
+      else if (m === dyr) { p.pos.y = top + p.half; if (p.vel.y < 0) p.vel.y = 0; }
+      else if (m === dzl) { p.pos.z = z0 - p.half; if (p.vel.z > 0) p.vel.z = 0; }
+      else { p.pos.z = z1 + p.half; if (p.vel.z < 0) p.vel.z = 0; }
+      return;
+    }
     if (p.pos.y - p.half >= top - 0.05 || p.pos.y + p.half <= bottom + 0.05) return;
     const px0 = x0 - p.half, px1 = x1 + p.half;
     const pz0 = z0 - p.half, pz1 = z1 + p.half;
@@ -801,4 +892,5 @@ const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vect
 const _f = new THREE.Vector3();
 const _sweepPrev = new THREE.Vector3();
 const _prePush = new THREE.Vector3();
+const _rollAxis = new THREE.Vector3();
 const _zero = new THREE.Vector3();

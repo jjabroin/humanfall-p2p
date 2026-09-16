@@ -345,11 +345,12 @@ export class NetSystem {
       if (now - r.lastRx > 8000 && r.name !== '???') { this.#removePeer(id); continue; }
       // 데드레코닝: 마지막 속도로 예측한 지점으로 보간 (지연 체감 감소)
       const age = Math.min(0.5, (now - r.rxT) / 1000);
+      const py0 = r.pos.y;
       _pv.copy(r.target).addScaledVector(r.vel, age);
       if (r.pos.distanceToSquared(_pv) > 16) r.pos.copy(_pv); // 4m 이상 벌어지면 스냅
       else r.pos.lerp(_pv, k);
       // 리모트 아바타도 벽/바닥 충돌 (벽 통과 잔상 방지)
-      world.collidePlayer(r.pos, r.vel, dt);
+      world.collidePlayer(r.pos, r.vel, dt, py0);
       let d = (r.targetYaw - r.yaw) % (Math.PI * 2);
       if (d > Math.PI) d -= Math.PI * 2;
       if (d < -Math.PI) d += Math.PI * 2;
