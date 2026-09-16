@@ -21,6 +21,7 @@ export class HumanSystem {
   heldMass01 = 0;   // 든 무게 (0~1)
   armStrain = 0;    // 손당 상대 하중 (0~1, 팔 처짐용)
   grabStrain = 0;   // 실제 힘 발휘율 (0~1, 감속/뒤젖힘용)
+  hanging = false;  // 벽에 매달림 (걷기 무효)
   lifting = false;  // 위를 보며 번쩍 드는 중
   overhead = false; // 머리 위로 번쩍
   respawnPoint = null;   // { x,y,z,yaw } — 체크포인트가 갱신
@@ -120,6 +121,11 @@ export class HumanSystem {
     this.#wasGrabbed = !!grabber;
     const damp = grabber ? 0.45 : 1; // 잡히면 조작 반감
 
+    // 매달리기 사전 판정 (이동보다 먼저: 매달리면 걷기 무효)
+    this.hanging = !this.grounded
+      && (this.grabL?.kind === 'wall' || this.grabR?.kind === 'wall')
+      && this.vel.y < 3;
+
     // --- 든 무게 집계 (무게중심 효과용) ---
     // strain: 손 하나당 상대 하중 (가벼우면 팔 쭉, 무거우면 팔 처짐+떨림)
     let heldMass = 0, overhead = false, hands = 0;
@@ -157,7 +163,8 @@ export class HumanSystem {
       const targetYaw = Math.atan2(wx, wz) + Math.PI; // 모델 정면 -Z 보정
       this.yaw = dampAngle(this.yaw, targetYaw, this.overhead ? 7 : 12, dt);
       // 낚아채는 중이면 가속도도 함께 죽음 (헛발질 방지: 다리는 실제 속도만큼만)
-      const acc = (this.grounded ? C.accel : C.accel * C.airControl) * damp * (1 - 0.7 * this.grabStrain);
+      // 매달리면 걷기 무효 (허공에서 걸을 수 없음)
+      const acc = (this.grounded ? C.accel : C.accel * C.airControl) * damp * (1 - 0.7 * this.grabStrain) * (this.hanging ? 0.15 : 1);
       this.vel.x += wx * acc * dt;
       this.vel.z += wz * acc * dt;
     } else if (this.grounded) {
@@ -176,14 +183,17 @@ export class HumanSystem {
       ctx.events.emit(EV.JUMP);
     }
 
-    // --- 벽 잡고 오르기 (클라임 벽 근처, 공중, 위를 보며 W) ---
-    const wallHold = (this.grabL?.kind === 'wall' || this.grabR?.kind === 'wall');
-    if (wallHold && !this.grounded) {
-      // 매달리기: 가슴보다 위를 잡으면 거의 안 미끄러짐. 낮게 잡으면 미끄러짐.
-      const chestY = this.pos.y + 1.25;
-      const hangHold = (this.grabL?.kind === 'wall' && this.grabL.point.y > chestY - 0.3)
-        || (this.grabR?.kind === 'wall' && this.grabR.point.y > chestY - 0.3);
-      this.vel.y = THREE.MathUtils.clamp(this.vel.y, hangHold ? -0.15 : -1.2, 3.0);
+    // --- 벽 잡고 매달리기/풀업 ---
+    // 매달리기 판정은 이동 전에 계산됨 (this.hanging).
+    // 잡자마자 걸려야 해서 높이 비교 안 함.
+    const hangHold = this.hanging;
+    if (hangHold) {
+      // HFF식 매달리기: 가만히 매달림. 아래를 볼수록 올라감 (최대 2.2m/s). 로켓 금지.
+      const lookDown = THREE.MathUtils.clamp((cam.pitch - 0.15) / 0.4, 0, 1);
+      const targetY = lookDown * 2.2;
+      this.vel.y += (targetY - this.vel.y) * Math.min(1, 8 * dt);
+      this.vel.x *= (1 - 2 * dt);
+      this.vel.z *= (1 - 2 * dt);
     } else {
       this.vel.y -= C.gravity * dt;
       if (this.vel.y < -30) this.vel.y = -30;
@@ -213,27 +223,6 @@ export class HumanSystem {
       const sw = this.heldMass01, t = ctx.clock.elapsed;
       this.vel.x += Math.sin(t * 5.2) * 4 * sw * dt;
       this.vel.z += Math.cos(t * 4.3) * 4 * sw * dt;
-    }
-
-    // --- 정적 잡기 풀업: 벽/모서리를 잡고 매달리면 몸이 올라감 ---
-    // (움직이지 않는 대상이라 반작용이 전부 몸으로 옴. HFF 등반의 핵심)
-    // 당기는 세기는 시야각 비례: 아래를 볼수록 강하게. 수평 보면 매달리기만.
-    // 위로 당기는 분력은 전부, 아래로 잡아끄는 분력은 수평만 살짝 (점프 방해 금지)
-    this.chestPos(_c);
-    const pullScale = THREE.MathUtils.clamp((cam.pitch - 0.02) / 0.45, 0, 1);
-    for (const g of [this.grabL, this.grabR]) {
-      if (g?.kind !== 'wall') continue;
-      _t.set(g.point.x - _c.x, g.point.y - _c.y, g.point.z - _c.z);
-      const d = _t.length();
-      if (d < 0.05) continue;
-      _t.multiplyScalar(Math.min(2200, 900 * d) / d);
-      const k = (dt / 70) * (this.grounded ? 0.2 : 1) * pullScale;
-      if (_t.y > 0) {
-        this.vel.addScaledVector(_t, k);
-      } else {
-        this.vel.x += _t.x * k * 0.3;
-        this.vel.z += _t.z * k * 0.3;
-      }
     }
 
     // --- 적분 + 충돌 (빠르면 나눠서: 벽 터널링 방지) ---
