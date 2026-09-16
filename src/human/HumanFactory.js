@@ -141,7 +141,8 @@ const _ikP = new THREE.Vector3(), _ikE = new THREE.Vector3(), _ikQ = new THREE.Q
 const _ikDown = new THREE.Vector3(0, -1, 0);
 
 /**
- * 투본 IK: 어깨→팔꿈치→손. 손은 잡은 점에 항상 붙음 (팔이 고무줄처럼 늘어남, HFF식).
+ * 투본 IK: 어깨→팔꿈치→손. 팔 길이는 고정 (0.7m).
+ * 목표가 닿지 않으면 팔을 쭉 편 채로 멈춤 (몸이 끌려와야 함).
  */
 export function solveArmIK(arm, root, targetWorld) {
   arm.shoulder.updateWorldMatrix(true, false);
@@ -151,15 +152,9 @@ export function solveArmIK(arm, root, targetWorld) {
   let d = _ikD.length();
   if (d < 0.05) return _ikT;
   _ikD.multiplyScalar(1 / d);
-  // 팔 길이보다 멀면 고무줄처럼 늘어남 (손은 절대 안 떨어짐)
-  const a0 = arm.upperLen, b0 = arm.foreLen;
-  let a = a0, b = b0, s = 1;
-  if (d > a0 + b0) {
-    s = Math.min(d / (a0 + b0), 4);
-    a *= s; b *= s;
-  }
-  arm.shoulder.scale.set(1, s, 1);
-  arm.elbow.scale.set(1, s, 1);
+  // 팔은 늘어나지 않음 (고정 길이). 손이 멀면 몸이 끌려가야 함 (월드에서 처리).
+  // d > a+b면 cosA가 1로 클램프되어 팔이 쭉 펴짐.
+  const a = arm.upperLen, b = arm.foreLen;
   // 굽힘 평면: 아래+바깥 방향 폴
   root.getWorldQuaternion(_ikQ);
   _ikP.set(arm.sideSign, -1, 0).normalize().applyQuaternion(_ikQ);

@@ -85,7 +85,7 @@ export class WorldSystem {
     this.#crate(scene, 0.5, 0.35, 19, 0.7, 8);
     this.#ball(scene, -1.5, 0.6, 23);
     this.#crate(scene, -11, 1.25, 24, 0.9, 10);
-    this.#crate(scene, 3.2, 0.65, 19.5, 1.3, 60);
+    this.#crate(scene, 3.2, 0.65, 19.5, 1.3, 80);
 
     // 골인 링
     const ring = new THREE.Mesh(
@@ -713,13 +713,13 @@ export class WorldSystem {
     const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
     if (d >= minD || d <= 0.001 || !overlapY) return;
     _v1.normalize();
-    // 질량 분할: 가벼우면 물체가 밀리고, 무거우면 몸이 밀려남 (몸 70kg 기준)
-    // 접근 속도에 비례한 가벼운 쿵 (탄성 0.4, 상한 2.5) — 몸으로 툭 쳐도 가볍게 날아가지 않음
-    const m = p.mass ?? 10, pm = PLAYER_MASS;
+    // 질량 분할: 가벼우면 물체가 밀리고, 무거우면 몸이 밀려남 (몸 70kg 기준, 가중)
+    // 접근 속도에 비례한 가벼운 쿵 (탄성 낮게, 상한 1.8) — 몸으로 툭 쳐도 가볍게 날아가지 않음
+    const m = (p.mass ?? 10) * 1.5, pm = PLAYER_MASS;
     const push = (minD - d) * 8;
     const relVx = human.vel.x - p.vel.x, relVz = human.vel.z - p.vel.z;
     const approach = Math.max(0, relVx * _v1.x + relVz * _v1.z);
-    const kick = Math.min(approach * 0.4, 2.5) * (pm / (pm + m));
+    const kick = Math.min(approach * 0.25, 1.8) * (pm / (pm + m));
     _prePush.copy(p.pos);
     p.pos.addScaledVector(_v1, push * 0.016 * (pm / (pm + m)));
     p.vel.addScaledVector(_v1, kick);

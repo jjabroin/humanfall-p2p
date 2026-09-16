@@ -289,6 +289,7 @@ export class HumanSystem {
     // 팽팽한 줄: 몸이 물체에서 멀어지면, 물체 속도에 연동 (함께 기어가듯 움직임).
     // 무거울수록 몸이 물체 속도에 묶임. 가벼우면 제한 없음.
     // 힘을 다 쓰고도 물체가 안 오면(풀 스트레인) 몸도 거의 못 빠져나감.
+    // + 팔이 다 펴져도 안 닿으면 몸이 잡은 점으로 끌려감 (팔은 안 늘어남).
     for (const g of [this.grabL, this.grabR]) {
       if (g?.kind !== 'prop') continue;
       const dx = this.pos.x - g.ref.pos.x, dz = this.pos.z - g.ref.pos.z;
@@ -308,15 +309,27 @@ export class HumanSystem {
           this.vel.z -= nz * kill;
         }
       }
+      // 팔 reach(0.72m) 초과: 몸을 잡은 점으로 당김 (무거울수록 강하게)
+      this.#grabPoint(g, _t);
+      const sx = this.pos.x, sy = this.pos.y + 1.24, sz = this.pos.z;
+      const gx = _t.x - sx, gy = _t.y - sy, gz = _t.z - sz;
+      const gd = Math.hypot(gx, gy, gz);
+      if (gd > 0.75) {
+        const m = g.ref.mass ?? 10;
+        const pull = Math.min(25, 30 * (gd - 0.75)) * (m / (m + 70));
+        this.vel.x += (gx / gd) * pull * dt;
+        this.vel.y += (gy / gd) * pull * dt;
+        this.vel.z += (gz / gd) * pull * dt;
+      }
     }
     // 리모트 프롭에 겹치면 플레이어가 밀려남
     world.pushPlayerFromRemoteProps(this);
 
     if (!this.grounded) this.#airTime += dt; else this.#airTime = 0;
 
-    // --- 양손 동시 잡기 (E / 휠클릭 / 🤲) ---
+    // --- 양손 동시 잡기 (E / 휠클릭 / 🤲): 비어있는 손은 범위 내를 자동 탐색 ---
     const bothHeld = input.both || input.held('both');
-    if (bothHeld && !this.#prevBoth) {
+    if (bothHeld && (!this.grabL || !this.grabR)) {
       for (const side of ['L', 'R']) {
         const cur = side === 'L' ? this.grabL : this.grabR;
         if (cur) continue;
@@ -325,9 +338,9 @@ export class HumanSystem {
           found.fromBoth = true;
           if (side === 'L') this.grabL = found; else this.grabR = found;
           if (found.kind === 'prop') this.world().setGrab(found.ref, this, side, found.offset);
+          ctx.events.emit(EV.GRAB, { side: 'B' });
         }
       }
-      if (this.grabL || this.grabR) ctx.events.emit(EV.GRAB, { side: 'B' });
     } else if (!bothHeld && this.#prevBoth) {
       // 양손 버튼으로 잡은 것만 해제 (개별 클릭분은 유지)
       for (const side of ['L', 'R']) {
@@ -370,7 +383,8 @@ export class HumanSystem {
   #edgeGrab(side, held, ctx, dt) {
     const cur = side === 'L' ? this.grabL : this.grabR;
     const prev = side === 'L' ? this.#prevGrabL : this.#prevGrabR;
-    if (held && !prev && !cur) {
+    // 토글이 켜져 있고 손이 비면 매 틱 잡기 시도 (범위에 들어오자마자 착 달라붙음)
+    if (held && !cur) {
       const found = this.#findGrabTarget(side, ctx);
       if (found) {
         if (side === 'L') this.grabL = found; else this.grabR = found;
