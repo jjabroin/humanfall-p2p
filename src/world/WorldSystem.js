@@ -5,8 +5,14 @@ import { EV } from '../core/events.js';
 // 떠있는 섬 레벨 + 잡기/밀기 가능한 프롭 + 골인 링.
 // 물리는 커스텀 경량 물리 (stickfight처럼 외부 물리엔진 없음).
 // 잡기는 힘 기반: 손 스프링(힘 상한) vs 무게. 가벼우면 들리고, 무거우면 못 들고 끌려감.
+// 잡기 물리 (Valve 그래비티건 shadow-controller식):
+// - 임계감쇠 스프링 (dampFactor 1.0, 출렁임 없음), 주파수 4.5Hz (질량 무관 동일 응답)
+// - 절대 순간이동 없음 (부드럽게 따라옴)
+// - 무거울수록 최대 추종속도 감소 (가벼움 8m/s → 특대 1.2m/s)
+// - 손 힘 상한 (한 손 360, 번쩍 1.5배): 무거운 건 못 듦
 const HAND_FMAX = 360;   // 손 하나가 낼 수 있는 최대 힘 (공 한 손 432에는 못 미침)
-const GRAB_K = 1000;      // 잡기 스프링 강성 (가벼운 건 손 높이에서도 들리게)
+const GRAB_FREQ = 4.5;   // 스프링 고유진동수 Hz
+const GRAB_OMEGA = Math.PI * 2 * GRAB_FREQ;
 const PLAYER_MASS = 70;
 export class WorldSystem {
   solids = [];     // { x0,x1,z0,z1,top,bottom,mover|null,mesh }
@@ -420,8 +426,8 @@ export class WorldSystem {
     return null;
   }
 
-  // 잡을 수 있는 표면점: 클라임벽 전체 + 지형의 옆면/모서리/밑면/천장.
-  // 바닥 잡기 금지: 윗면은 손이 아래 있을 때만 (밑에서/옆에서 잡기).
+  // 잡을 수 있는 표면점: 클라임벽 전체 + 지형의 옆면/윗모서리.
+  // 바닥·밑면 잡기 금지: 윗면은 손이 아래 있을 때만, 밑면은 항상 제외.
   // 무빙 발판은 제외.
   grabSurface(hand, maxDist) {
     let bx = 0, by = 0, bz = 0, bestD = maxDist;
@@ -441,6 +447,8 @@ export class WorldSystem {
       }
       const isTop = Math.abs(py - y1) < 0.12 && px > x0 && px < x1 && pz > z0 && pz < z1;
       if (isTop && hand.y >= y1 + 0.3) return; // 바닥 잡기 금지
+      const isBottom = Math.abs(py - y0) < 0.12 && px > x0 && px < x1 && pz > z0 && pz < z1;
+      if (isBottom) return; // 밑면 잡기 금지
       const d = Math.hypot(hand.x - px, hand.y - py, hand.z - pz);
       if (d < bestD) { bestD = d; bx = px; by = py; bz = pz; found = true; }
     };
@@ -510,11 +518,14 @@ export class WorldSystem {
         continue;
       }
       if (p.holds.length > 0) {
-        // HFF식 잡기: 손은 물체 표면에 붙고(렌더는 IK), 절차적 손 목표점과의
-        // 차이만큼 힘을 줌. 위를 볼수록 수직 힘 허용(들어올림), 평소엔 끌기.
-        // 몸도 반작용으로 당겨져서 함께 느리게 움직임.
+        // HFF식 잡기 + Valve shadow-controller식 임계감쇠:
+        // 손은 물체 표면에 붙고(렌더 IK), 절차적 손 목표점과의 차이로
+        // 임계감쇠 PD 힘을 줌 (출렁임 없이 착 달라붙음). 위를 볼수록 수직 허용.
+        // 몸도 반작용으로 당겨져서 함께 느리게 움직임. 순간이동 없음.
         _f.set(0, 0, 0);
-        const dampC = Math.sqrt(GRAB_K * p.mass);
+        const k = p.mass * GRAB_OMEGA * GRAB_OMEGA;
+        const c = 2 * p.mass * GRAB_OMEGA;
+        const vmax = p.mass <= 12 ? 8 : Math.max(1.0, 96 / p.mass);
         const pitch = ctx.get('camera').pitch;
         const gate = THREE.MathUtils.clamp((-pitch - 0.05) / 0.35, 0.12, 1);
         for (const h of p.holds) {
@@ -527,15 +538,16 @@ export class WorldSystem {
             avx = (_v1.x - h.ax) / dt; avy = (_v1.y - h.ay) / dt; avz = (_v1.z - h.az) / dt;
           }
           h.ax = _v1.x; h.ay = _v1.y; h.az = _v1.z;
+          h.avx = avx; h.avy = avy; h.avz = avz;
           _v2.copy(p.pos).add(h.offset);   // 붙은 표면점
           _v3.copy(_v1).sub(_v2);          // 표면점 → 목표점
           const dist = _v3.length();
           const fmax = HAND_FMAX * (h.player.lifting ? 1.5 : 1) * grip;
           if (dist > 0.02 && fmax > 1) {
-            _v3.multiplyScalar(Math.min(fmax, dist * GRAB_K) / dist);
-            _v3.x -= (p.vel.x - avx) * dampC;
-            _v3.y -= (p.vel.y - avy) * dampC;
-            _v3.z -= (p.vel.z - avz) * dampC;
+            _v3.multiplyScalar(k / dist);
+            _v3.x -= (p.vel.x - avx) * c;
+            _v3.y -= (p.vel.y - avy) * c;
+            _v3.z -= (p.vel.z - avz) * c;
             if (_v3.y > 0) _v3.y = Math.min(_v3.y, fmax * gate); // 들어올리기 게이트
             if (_v3.length() > fmax) _v3.setLength(fmax);
             h.lastF = _v3.length();
@@ -547,6 +559,14 @@ export class WorldSystem {
         }
         p.vel.addScaledVector(_f, dt / p.mass);
         p.vel.y -= Config.gravity * dt;
+        // 최대 추종속도 (무거울수록 느림): 앵커 대비 상대속도 제한
+        {
+          const h0 = p.holds[0];
+          const avx = h0.avx ?? 0, avy = h0.avy ?? 0, avz = h0.avz ?? 0;
+          _v2.set(p.vel.x - avx, p.vel.y - avy, p.vel.z - avz);
+          const rs = _v2.length();
+          if (rs > vmax) p.vel.addScaledVector(_v2, (vmax - rs) / rs);
+        }
         // 하나 되기: 무거울수록 몸 속도가 물체 속도에 끌려감 (같이 느려지고 같이 떨어짐)
         for (const h of p.holds) {
           const couple = (p.mass / (p.mass + PLAYER_MASS)) * Math.min(1, 8 * dt);
@@ -684,9 +704,26 @@ export class WorldSystem {
     }
   }
 
+  // 디버그: 잡기 상태 스냅샷
+  dbgGrab() {
+    const out = [];
+    const pitch = this.ctx.get('camera').pitch;
+    for (const p of this.props) {
+      for (const h of p.holds) {
+        h.player.desiredHand(h.side, _v1, pitch);
+        _v2.copy(p.pos).add(h.offset);
+        out.push({
+          id: p.id, dist: +_v1.distanceTo(_v2).toFixed(2),
+          lastF: Math.round(h.lastF ?? 0), age: +(h.age ?? 0).toFixed(2),
+          cy: +p.pos.y.toFixed(2), owner: String(p.owner).slice(0, 6),
+        });
+      }
+    }
+    return out;
+  }
+
   // 특정 플레이어가 잡기로 가하는 힘 비율 (0~1, 몸 감속/기울기용)
-  strainOf(player) {
-    let f = 0, n = 0;
+  strainOf(player) {    let f = 0, n = 0;
     for (const p of this.props) {
       for (const h of p.holds) {
         if (h.player === player) { f = Math.max(f, h.lastF ?? 0); n++; }
