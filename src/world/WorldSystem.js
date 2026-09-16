@@ -500,7 +500,10 @@ export class WorldSystem {
     const loff = offset ? offset.clone() : new THREE.Vector3();
     _tq.set(prop.quat.x, prop.quat.y, prop.quat.z, prop.quat.w).invert();
     loff.applyQuaternion(_tq);
-    prop.holds.push({ player, side, loff, age: 0, lastF: 0 });
+    // 멀리서 붙으면 서서히 (낚아채기 방지): 거리에 비례한 램프
+    player.handPos(side, _v1);
+    const gripT = THREE.MathUtils.clamp(_v1.distanceTo(prop.pos) / 3, 0.25, 1.0);
+    prop.holds.push({ player, side, loff, age: 0, lastF: 0, gripT });
     this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
   }
@@ -557,7 +560,7 @@ export class WorldSystem {
         const gate = THREE.MathUtils.clamp((-pitch - 0.05) / 0.35, 0.12, 1);
         for (const h of p.holds) {
           h.age = (h.age ?? 0) + dt;
-          const grip = Math.min(1, h.age / 0.25); // 잡은 직후 0.25초간 서서히 (낚아채기 방지)
+          const grip = Math.min(1, h.age / (h.gripT ?? 0.25)); // 붙는 거리에 비례해 서서히
           h.player.desiredHand(h.side, _v1, pitch);
           // 앵커 속도 (상대 감쇠용: 함께 움직이면 감쇠 없음).
           // 물리적으로 불가능한 속도(텔레포트/시점 스냅)는 클램프 — 아니면 든 물체가 날아감.
@@ -628,7 +631,7 @@ export class WorldSystem {
       } else if (p.owner === net.selfKey) {
         p.vel.y -= Config.gravity * dt;
         // 플레이어에게 밀림
-        this.#pushBy(human, p);
+        this.#pushBy(human, p, dt);
         for (const r of net.remotes()) this.#pushByRemote(r, p);
         // 벽 + 바닥 (서브스텝 적분 포함)
         this.#stepProp(p, dt);
@@ -887,7 +890,7 @@ export class WorldSystem {
     else { p.pos.z = pz1; if (p.vel.z < 0) p.vel.z = 0; }
   }
 
-  #pushBy(human, p) {
+  #pushBy(human, p, dt) {
     if (p.holds.some((h) => h.player === human)) return; // 내가 든 건 몸으로 밀어내지 않음
     if (human.pos.y > p.pos.y) return; // 위에 올라탄 건 밀어내지 않음 (밟기 허용)
     _v1.set(p.pos.x - human.pos.x, 0, p.pos.z - human.pos.z);
@@ -896,23 +899,27 @@ export class WorldSystem {
     if (d >= minD || d <= 0.001 || !overlapY) return;
     _v1.normalize();
     // 질량 분할: 가벼우면 물체가 밀리고, 무거우면 몸이 밀려남 (몸 70kg 기준, 가중)
-    // 접근 속도에 비례한 가벼운 쿵 (탄성 낮게, 상한 1.8) — 몸으로 툭 쳐도 가볍게 날아가지 않음
+    // 속도는 플레이어 속도를 넘지 않게 (밀면 같이 감, 발사 금지)
     const m = (p.mass ?? 10) * 1.5, pm = PLAYER_MASS;
     const push = (minD - d) * 8;
-    const relVx = human.vel.x - p.vel.x, relVz = human.vel.z - p.vel.z;
-    const approach = Math.max(0, relVx * _v1.x + relVz * _v1.z);
-    const kick = Math.min(approach * 0.18, 1.4) * (pm / (pm + m));
+    const hvn = human.vel.x * _v1.x + human.vel.z * _v1.z;
+    const pvn = p.vel.x * _v1.x + p.vel.z * _v1.z;
+    const share = pm / (pm + m);
     _prePush.copy(p.pos);
-    p.pos.addScaledVector(_v1, push * 0.016 * (pm / (pm + m)));
-    p.vel.addScaledVector(_v1, kick);
+    p.pos.addScaledVector(_v1, push * 0.016 * share);
+    let kick = 0;
+    if (hvn > pvn) {
+      kick = (hvn - pvn) * share * Math.min(1, 10 * dt);
+      p.vel.addScaledVector(_v1, kick);
+    }
+    human.pos.addScaledVector(_v1, -push * 0.016 * (m / (pm + m)));
     // 높이 차로 밀면 넘어짐 (위에서 밀수록 잘 넘어감)
     const ry = (human.pos.y + 1.0) - p.pos.y;
-    if (ry > 0.15 && kick > 0.01) {
-      const tq = kick * m * ry * 0.12;
+    if (ry > 0.15 && kick > 0.0005) {
+      const tq = kick * m * ry * 1.0;
       p.angVel.x += (_v1.z * tq) / p.inertia;
       p.angVel.z += (-_v1.x * tq) / p.inertia;
     }
-    human.pos.addScaledVector(_v1, -push * 0.016 * (m / (pm + m)));
     // 물체가 못 움직였으면(벽에 낌) 몸이 밀려남 — 끼인 물체는 고체
     this.collideProp(p, _prePush);
     _v1.set(p.pos.x - human.pos.x, 0, human.pos.z - human.pos.z);

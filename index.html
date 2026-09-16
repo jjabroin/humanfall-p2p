@@ -67,6 +67,12 @@
     color: #ffd75e; font-size: 14px; font-weight: 700; display: none;
     text-shadow: 0 2px 8px rgba(0,0,0,.7);
   }
+  #hands {
+    position: absolute; bottom: 14px; right: 12px; color: #fff; font-size: 13px;
+    background: rgba(10,14,30,.72); border: 1px solid rgba(255,255,255,.14);
+    border-radius: 12px; padding: 8px 12px; line-height: 1.7; pointer-events: none;
+  }
+  #hands .on { color: #ffd75e; font-weight: 700; }
   #toast {
     position: absolute; top: 70px; left: 50%; transform: translateX(-50%);
     display: flex; flex-direction: column; gap: 8px; align-items: center;
@@ -159,6 +165,7 @@
     <div id="hud">
       <div id="topbar"><div class="pill" id="roomPill" title="클릭하면 복사">방 코드 <b id="roomCode">------</b> 📋</div><div class="pill" id="goalPill">🥅 --m</div></div>
       <div id="players"></div>
+      <div id="hands" title="잡은 손 상태"></div>
       <div id="toast"></div>
       <div id="grabTip">🤏 잡았다! 다시 누르면 놓음</div>
       <div id="hint">WASD 이동 · Space 점프 · 좌/우클릭 잡기 · 골인 링으로!</div>

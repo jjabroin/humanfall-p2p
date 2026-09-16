@@ -32,6 +32,8 @@ export class HumanSystem {
   #prevGrabL = false;
   #prevGrabR = false;
   #prevBoth = false;
+  #grabCdL = 0;   // 재잡기 쿨다운 (던지고 바로 달라붙어 펌핑되는 것 방지)
+  #grabCdR = 0;
   #mesh = null;
   #reachL = 0; #reachR = 0;
   #tauntT = 0;
@@ -319,10 +321,13 @@ export class HumanSystem {
 
     // --- 양손 동시 잡기 (E / 휠클릭 / 🤲): 비어있는 손은 범위 내를 자동 탐색 ---
     const bothHeld = input.both || input.held('both');
+    this.#grabCdL = Math.max(0, this.#grabCdL - dt);
+    this.#grabCdR = Math.max(0, this.#grabCdR - dt);
     if (bothHeld && (!this.grabL || !this.grabR)) {
       for (const side of ['L', 'R']) {
         const cur = side === 'L' ? this.grabL : this.grabR;
         if (cur) continue;
+        if ((side === 'L' ? this.#grabCdL : this.#grabCdR) > 0) continue;
         const found = this.#findGrabTarget(side, ctx);
         if (found) {
           found.fromBoth = true;
@@ -337,7 +342,8 @@ export class HumanSystem {
         const cur = side === 'L' ? this.grabL : this.grabR;
         if (!cur || !cur.fromBoth) continue;
         if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
-        if (side === 'L') this.grabL = null; else this.grabR = null;
+        if (side === 'L') { this.grabL = null; this.#grabCdL = 0.5; }
+        else { this.grabR = null; this.#grabCdR = 0.5; }
       }
       ctx.events.emit(EV.THROW);
     }
@@ -373,8 +379,11 @@ export class HumanSystem {
   #edgeGrab(side, held, ctx, dt) {
     const cur = side === 'L' ? this.grabL : this.grabR;
     const prev = side === 'L' ? this.#prevGrabL : this.#prevGrabR;
+    const cd = side === 'L' ? this.#grabCdL : this.#grabCdR;
+    const setCd = (v) => { if (side === 'L') this.#grabCdL = v; else this.#grabCdR = v; };
     // 토글이 켜져 있고 손이 비면 매 틱 잡기 시도 (범위에 들어오자마자 착 달라붙음)
-    if (held && !cur) {
+    // 단, 놓은 직후 쿨다운 중에는 재시도 안 함 (잡았다놨다 펌핑 방지)
+    if (held && !cur && cd <= 0) {
       const found = this.#findGrabTarget(side, ctx);
       if (found) {
         if (side === 'L') this.grabL = found; else this.grabR = found;
@@ -387,6 +396,7 @@ export class HumanSystem {
       if (!(cur.fromBoth && bothActive)) {
         if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
         if (side === 'L') this.grabL = null; else this.grabR = null;
+        setCd(0.5);
         ctx.events.emit(EV.THROW);
       }
     }
@@ -396,6 +406,7 @@ export class HumanSystem {
       if (tp.distanceToSquared(this.pos) > 64) {
         if (cur.kind === 'prop') this.world().releaseGrab(cur.ref, this, side);
         if (side === 'L') this.grabL = null; else this.grabR = null;
+        setCd(0.5);
       }
     }
     if (cur?.kind === 'player' && _t.copy(cur.ref.pos).sub(this.pos).lengthSq() > 144) {
@@ -463,6 +474,7 @@ export class HumanSystem {
     if (this.grabL?.kind === 'prop') this.world().releaseGrab(this.grabL.ref, this, 'L');
     if (this.grabR?.kind === 'prop') this.world().releaseGrab(this.grabR.ref, this, 'R');
     this.grabL = this.grabR = null;
+    this.#grabCdL = 0.5; this.#grabCdR = 0.5;
     if (!quiet) ctx.events.emit(EV.RESPAWN);
   }
 

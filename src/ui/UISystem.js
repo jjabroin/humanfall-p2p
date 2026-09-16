@@ -9,6 +9,7 @@ export class UISystem {
     this.roomCode = $('roomCode'); this.players = $('players');
     this.toastBox = $('toast'); this.grabTip = $('grabTip');
     this.lockTip = $('lockTip'); this.goalPill = $('goalPill');
+    this.handsBox = $('hands');
 
     const nick = $('nick'), code = $('code');
     nick.value = localStorage.getItem('hfall_nick') ?? '';
@@ -108,6 +109,7 @@ export class UISystem {
   #acc = 0;
   #goalAcc = 0;
   #diagShown = false;
+  #handAcc = 0;
   update(dt, ctx) {
     if (!this.inGame) return;
     const net = ctx.get('net'), human = ctx.get('human');
@@ -125,6 +127,16 @@ export class UISystem {
       this.#goalAcc = 0;
       const d = human.pos.distanceTo(ctx.get('world').goal);
       this.goalPill.textContent = d < 3 ? '🥅 거의 다 왔다!' : `🥅 ${Math.round(d)}m`;
+    }
+    // 잡은 손 표시 (토글 상태가 보이게)
+    this.#handAcc += dt;
+    if (this.#handAcc > 0.2 && this.handsBox) {
+      this.#handAcc = 0;
+      const handName = (g) => !g ? '–' : g.kind === 'prop' ? '📦' : g.kind === 'player' ? '🙂' : '🧗';
+      const lOn = human.grabL ? 'on' : '', rOn = human.grabR ? 'on' : '';
+      this.handsBox.innerHTML =
+        `<span class="${lOn}">🤏L ${handName(human.grabL)}</span> ` +
+        `<span class="${rOn}">R🤏 ${handName(human.grabR)}</span>`;
     }
     // 30초 넘게 혼자면 연결 진단 힌트 (1회)
     if (!this.#diagShown && net.online && net.peers.size === 0 && performance.now() - net.joinedAt > 30000) {
