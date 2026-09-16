@@ -403,9 +403,12 @@ export class HumanSystem {
     }
   }
 
-  // 잡은 점 월드좌표 (IK 목표 + 힘 계산용)
+  // 잡은 점 월드좌표 (IK 목표 + 힘 계산용). 회전 따라감.
   #grabPoint(g, out) {
-    if (g.kind === 'prop') return out.copy(g.ref.pos).add(g.offset);
+    if (g.kind === 'prop') {
+      _t.copy(g.loff ?? g.offset).applyQuaternion(g.ref.quat);
+      return out.copy(g.ref.pos).add(_t);
+    }
     if (g.kind === 'player') return out.set(g.ref.pos.x, g.ref.pos.y + 1.2, g.ref.pos.z);
     return out.copy(g.point);
   }
@@ -428,7 +431,11 @@ export class HumanSystem {
         const ox = THREE.MathUtils.clamp(_h.x - p.pos.x, -p.half, p.half);
         const oy = THREE.MathUtils.clamp(_h.y - p.pos.y, -p.half, p.half);
         const oz = THREE.MathUtils.clamp(_h.z - p.pos.z, -p.half, p.half);
-        best = { kind: 'prop', ref: p, offset: new THREE.Vector3(ox, oy, oz), slipT: 0 };
+        const off = new THREE.Vector3(ox, oy, oz);
+        const loff = off.clone();
+        _tq.copy(p.quat).invert();
+        loff.applyQuaternion(_tq);
+        best = { kind: 'prop', ref: p, offset: off, loff, slipT: 0 };
       }
     }
     for (const r of net?.remotes() ?? []) {
@@ -525,6 +532,7 @@ export class HumanSystem {
 }
 
 const _t = new THREE.Vector3(), _c = new THREE.Vector3(), _h = new THREE.Vector3();
+const _tq = new THREE.Quaternion();
 
 function dampAngle(a, b, lambda, dt) {
   let d = (b - a) % (Math.PI * 2);

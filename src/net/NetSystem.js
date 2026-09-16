@@ -107,6 +107,7 @@ export class NetSystem {
       t: 'claim', id: prop.id,
       p: [prop.pos.x, prop.pos.y, prop.pos.z],
       v: [prop.vel.x, prop.vel.y, prop.vel.z],
+      q: [prop.quat.x, prop.quat.y, prop.quat.z, prop.quat.w],
       ct: prop.claimT ?? 0, by: prop.claimBy ?? '',
       h: prop.holds.length > 0,
     };
@@ -186,6 +187,11 @@ export class NetSystem {
     prop.owner = senderId;
     prop.remote = true;
     prop.heldByOther = !!d.h;
+    if (d.q) {
+      prop.quat.set(d.q[0], d.q[1], d.q[2], d.q[3]);
+      if (!prop.targetQuat) prop.targetQuat = new THREE.Quaternion();
+      prop.targetQuat.copy(prop.quat);
+    }
     // 순간이동 금지: lerp 타겟만 갱신 (진짜 순간이동-리스폰 등-은 점프감지가 처리)
     if (!prop.syncTarget) prop.syncTarget = new THREE.Vector3();
     if (!prop.syncVel) prop.syncVel = new THREE.Vector3();
@@ -217,8 +223,12 @@ export class NetSystem {
       prop.remote = true;
       if (!prop.syncTarget) prop.syncTarget = new THREE.Vector3();
       if (!prop.syncVel) prop.syncVel = new THREE.Vector3();
+      if (!prop.targetQuat) prop.targetQuat = new THREE.Quaternion();
+      if (!prop.syncAngVel) prop.syncAngVel = new THREE.Vector3();
       prop.syncTarget.set(d.p[0], d.p[1], d.p[2]);
       if (d.v) prop.syncVel.set(d.v[0], d.v[1], d.v[2]);
+      if (d.q) prop.targetQuat.set(d.q[0], d.q[1], d.q[2], d.q[3]);
+      if (d.w) prop.syncAngVel.set(d.w[0], d.w[1], d.w[2]);
       prop.syncT = performance.now();
     } else if (prop.owner === this.selfKey && senderId !== this.selfKey) {
       this.#reassert(prop); // 상대도 주인 행세 → 재선언으로 합의
@@ -343,7 +353,7 @@ export class NetSystem {
           const world = ctx.get('world');
           for (const p of world.props) {
             if (p.owner === this.selfKey && !p.remote) {
-              this.#relay?.send({ k: 'pr', d: { id: p.id, p: [p.pos.x, p.pos.y, p.pos.z], v: [p.vel.x, p.vel.y, p.vel.z] } });
+              this.#relay?.send({ k: 'pr', d: { id: p.id, p: [p.pos.x, p.pos.y, p.pos.z], v: [p.vel.x, p.vel.y, p.vel.z], q: [p.quat.x, p.quat.y, p.quat.z, p.quat.w], w: [p.angVel.x, p.angVel.y, p.angVel.z] } });
             }
           }
         }
@@ -361,7 +371,7 @@ export class NetSystem {
       const world = ctx.get('world');
       for (const p of world.props) {
         if (p.owner === this.selfKey && !p.remote) {
-          this.#safeSend(this.#sendProp, { t: 'pos', id: p.id, p: [p.pos.x, p.pos.y, p.pos.z], v: [p.vel.x, p.vel.y, p.vel.z] });
+          this.#safeSend(this.#sendProp, { t: 'pos', id: p.id, p: [p.pos.x, p.pos.y, p.pos.z], v: [p.vel.x, p.vel.y, p.vel.z], q: [p.quat.x, p.quat.y, p.quat.z, p.quat.w], w: [p.angVel.x, p.angVel.y, p.angVel.z] });
         }
       }
     }
@@ -411,7 +421,19 @@ export class NetSystem {
           p.pos.addScaledVector(_nv2, step / d);
           world.collideProp(p, _nv);
         }
+        // 리모트 회전: 각속도로 적분 후 목표 자세로 slerp
+        if (p.syncAngVel) {
+          const w = p.syncAngVel.length();
+          if (w > 0.01) {
+            _naxis.copy(p.syncAngVel).multiplyScalar(1 / w);
+            _nq.setFromAxisAngle(_naxis, w * dt);
+            p.quat.premultiply(_nq).normalize();
+          }
+        }
+        if (p.targetQuat) p.quat.slerp(p.targetQuat, 1 - Math.exp(-8 * dt));
+        world.updateExtents(p);
         p.mesh.position.copy(p.pos);
+        p.mesh.quaternion.copy(p.quat);
       }
     }
   }
@@ -419,3 +441,5 @@ export class NetSystem {
 const _pv = new THREE.Vector3();
 const _nv = new THREE.Vector3();
 const _nv2 = new THREE.Vector3();
+const _naxis = new THREE.Vector3();
+const _nq = new THREE.Quaternion();

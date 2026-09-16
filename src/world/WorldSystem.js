@@ -325,10 +325,14 @@ export class WorldSystem {
     );
     mesh.add(edge);
     scene.add(mesh);
+    const half = s / 2;
     this.props.push({
       id: `crate${this.props.length}`, mesh,
       pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(),
-      half: s / 2, mass, holds: [], grabbedBy: null, owner: 'local', remote: false,
+      half, mass, holds: [], grabbedBy: null, owner: 'local', remote: false,
+      quat: new THREE.Quaternion(), angVel: new THREE.Vector3(),
+      inertia: mass * (s * s + s * s + s * s) / 12,
+      hwx: half, hwy: half, hwz: half,
     });
   }
 
@@ -342,7 +346,20 @@ export class WorldSystem {
     this.props.push({
       id: 'ball', mesh, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(),
       half: 0.6, round: true, mass: 18, holds: [], grabbedBy: null, owner: 'local', remote: false,
+      quat: new THREE.Quaternion(), angVel: new THREE.Vector3(),
+      inertia: 0.4 * 18 * 0.6 * 0.6,
+      hwx: 0.6, hwy: 0.6, hwz: 0.6,
     });
+  }
+
+  // 회전된 박스의 월드 AABB 반폭 갱신
+  updateExtents(p) {
+    if (p.round) return;
+    _m4.makeRotationFromQuaternion(p.quat);
+    const e = _m4.elements, hx = p.half, hy = p.half, hz = p.half;
+    p.hwx = Math.abs(e[0]) * hx + Math.abs(e[4]) * hy + Math.abs(e[8]) * hz;
+    p.hwy = Math.abs(e[1]) * hx + Math.abs(e[5]) * hy + Math.abs(e[9]) * hz;
+    p.hwz = Math.abs(e[2]) * hx + Math.abs(e[6]) * hy + Math.abs(e[10]) * hz;
   }
 
   // ---- 충돌 ----
@@ -368,10 +385,10 @@ export class WorldSystem {
     for (const p of this.props) {
       if (p === ignoreProp) continue;
       if (Math.abs(p.vel.y) > 4) continue;
-      const t = p.pos.y + p.half;
+      const t = p.pos.y + p.hwy;
       const inside = p.round
         ? (x - p.pos.x) ** 2 + (z - p.pos.z) ** 2 < (p.half + 0.15) ** 2
-        : Math.abs(x - p.pos.x) < p.half + 0.15 && Math.abs(z - p.pos.z) < p.half + 0.15;
+        : Math.abs(x - p.pos.x) < p.hwx + 0.15 && Math.abs(z - p.pos.z) < p.hwz + 0.15;
       if (inside && t <= feetY + 0.3 && (top === null || t > top)) { top = t; ride = null; isProp = true; }
     }
     return top === null ? null : { top, ride, isProp };
@@ -479,7 +496,11 @@ export class WorldSystem {
     prop.syncTarget = null;
   }
   setGrab(prop, player, side, offset) {
-    prop.holds.push({ player, side, offset: offset ? offset.clone() : new THREE.Vector3(), age: 0, lastF: 0 });
+    // 잡은 표면점을 바디-로컬로 저장 (회전해도 따라감)
+    const loff = offset ? offset.clone() : new THREE.Vector3();
+    _tq.set(prop.quat.x, prop.quat.y, prop.quat.z, prop.quat.w).invert();
+    loff.applyQuaternion(_tq);
+    prop.holds.push({ player, side, loff, age: 0, lastF: 0 });
     this.#takeOwnership(prop);
     this.ctx.get('net')?.claimProp(prop);
   }
@@ -522,11 +543,13 @@ export class WorldSystem {
         continue;
       }
       if (p.holds.length > 0) {
-        // HFF식 잡기 + Valve shadow-controller식 임계감쇠:
+        // HFF식 잡기 + Valve shadow-controller식 임계감쇠 + 돌림힘:
         // 손은 물체 표면에 붙고(렌더 IK), 절차적 손 목표점과의 차이로
-        // 임계감쇠 PD 힘을 줌 (출렁임 없이 착 달라붙음). 위를 볼수록 수직 허용.
+        // 임계감쇠 PD 힘을 줌. 빗겨 잡으면 돌림힘으로 기울어짐.
+        // 위를 볼수록 수직 힘 허용(들어올림), 평소엔 끌기.
         // 몸도 반작용으로 당겨져서 함께 느리게 움직임. 순간이동 없음.
         _f.set(0, 0, 0);
+        _torque.set(0, 0, 0);
         const k = p.mass * GRAB_OMEGA * GRAB_OMEGA;
         const c = 2 * p.mass * GRAB_OMEGA;
         const vmax = p.mass <= 12 ? 8 : Math.max(1.0, 96 / p.mass);
@@ -543,8 +566,9 @@ export class WorldSystem {
           }
           h.ax = _v1.x; h.ay = _v1.y; h.az = _v1.z;
           h.avx = avx; h.avy = avy; h.avz = avz;
-          _v2.copy(p.pos).add(h.offset);   // 붙은 표면점
-          _v3.copy(_v1).sub(_v2);          // 표면점 → 목표점
+          _tv.copy(h.loff).applyQuaternion(p.quat);
+          _v2.copy(p.pos).add(_tv);   // 붙은 표면점 (회전 따라감)
+          _v3.copy(_v1).sub(_v2);     // 표면점 → 목표점
           const dist = _v3.length();
           const fmax = HAND_FMAX * (h.player.lifting ? 1.5 : 1) * grip;
           if (dist > 0.02 && fmax > 1) {
@@ -556,12 +580,17 @@ export class WorldSystem {
             if (_v3.length() > fmax) _v3.setLength(fmax);
             h.lastF = _v3.length();
             _f.add(_v3);
+            // 돌림힘: r × F (잡은 점이 중심에서 빗겨나면 기울어짐)
+            _torque.x += _tv.y * _v3.z - _tv.z * _v3.y;
+            _torque.y += _tv.z * _v3.x - _tv.x * _v3.z;
+            _torque.z += _tv.x * _v3.y - _tv.y * _v3.x;
             h.player.vel.addScaledVector(_v3, -dt / PLAYER_MASS);
           } else {
             h.lastF = 0;
           }
         }
         p.vel.addScaledVector(_f, dt / p.mass);
+        p.angVel.addScaledVector(_torque, dt / p.inertia);
         p.vel.y -= Config.gravity * dt;
         // 최대 추종속도 (무거울수록 느림): 앵커 대비 상대속도 제한
         {
@@ -579,11 +608,12 @@ export class WorldSystem {
           h.player.vel.z += (p.vel.z - h.player.vel.z) * couple;
         }
         this.#stepProp(p, dt);
+        this.#stepAngular(p, dt, 6); // 잡은 동안은 강하게 감쇠 (흔들림 없이)
         // 든 물건은 몸 밖으로 (관통 금지): 홀더 몸통을 고체로 취급
         for (const h of p.holds) {
           const hx = p.pos.x - h.player.pos.x, hz = p.pos.z - h.player.pos.z;
           const dy = p.pos.y - (h.player.pos.y + 0.9);
-          const hd = Math.hypot(hx, hz), hmin = p.half + 0.34;
+          const hd = Math.hypot(hx, hz), hmin = Math.max(p.hwx, p.hwz) + 0.34;
           if (hd < hmin && hd > 0.001 && Math.abs(dy) < 1.2) {
             const push = hmin - hd;
             p.pos.x += (hx / hd) * push;
@@ -599,6 +629,7 @@ export class WorldSystem {
         for (const r of net.remotes()) this.#pushByRemote(r, p);
         // 벽 + 바닥 (서브스텝 적분 포함)
         this.#stepProp(p, dt);
+        this.#stepAngular(p, dt, p.round ? 0.8 : 2.0);
         this.#groundProp(p, dt, false);
       }
     }
@@ -614,14 +645,7 @@ export class WorldSystem {
       _sweepPrev.set(p._px, p._py, p._pz);
       this.collideProp(p, _sweepPrev);
       p.mesh.position.copy(p.pos);
-      // 공은 구른다
-      if (p.round) {
-        const sp = Math.hypot(p.vel.x, p.vel.z);
-        if (sp > 0.1) {
-          _rollAxis.set(p.vel.z, 0, -p.vel.x).normalize();
-          p.mesh.rotateOnWorldAxis(_rollAxis, (sp * dt) / p.half);
-        }
-      }
+      p.mesh.quaternion.copy(p.quat);
     }
   }
 
@@ -675,16 +699,16 @@ export class WorldSystem {
             }
             continue;
           }
-          const ox = (a.half + b.half) - Math.abs(a.pos.x - b.pos.x);
-          const oz = (a.half + b.half) - Math.abs(a.pos.z - b.pos.z);
+          const ox = (a.hwx + b.hwx) - Math.abs(a.pos.x - b.pos.x);
+          const oz = (a.hwz + b.hwz) - Math.abs(a.pos.z - b.pos.z);
           if (ox <= 0 || oz <= 0) continue;
-          const oy = Math.min(a.pos.y + a.half, b.pos.y + b.half) - Math.max(a.pos.y - a.half, b.pos.y - b.half);
+          const oy = Math.min(a.pos.y + a.hwy, b.pos.y + b.hwy) - Math.max(a.pos.y - a.hwy, b.pos.y - b.hwy);
           if (oy <= 0) continue;
           if (oy < Math.min(ox, oz) * 0.6) {
             // 위아래로 포개짐: 위를 받침 (y 고정 + 수직속도 동기 + 수평 마찰)
             const top = a.pos.y > b.pos.y ? a : b;
             const bot = top === a ? b : a;
-            top.pos.y = bot.pos.y + bot.half + top.half;
+            top.pos.y = bot.pos.y + bot.hwy + top.hwy;
             if (top.vel.y < bot.vel.y) top.vel.y = bot.vel.y;
             top.vel.x += (bot.vel.x - top.vel.x) * 0.2;
             top.vel.z += (bot.vel.z - top.vel.z) * 0.2;
@@ -748,12 +772,32 @@ export class WorldSystem {
     }
   }
 
+  // 각속도 적분 + 감쇠 + 회전 AABB 갱신
+  #stepAngular(p, dt, angDamp) {
+    p.angVel.multiplyScalar(Math.max(0, 1 - angDamp * dt));
+    const w = p.angVel.length();
+    if (w > 0.001) {
+      _tv.set(p.angVel.x / w, p.angVel.y / w, p.angVel.z / w);
+      _dq.setFromAxisAngle(_tv, w * dt);
+      p.quat.premultiply(_dq).normalize();
+    }
+    this.updateExtents(p);
+  }
+
   #groundProp(p, dt, held) {
     const g = this.standAt(p.pos.x, p.pos.z, p.pos.y, p)?.top ?? null;
-    const restY = (g ?? -100) + p.half;
+    const restY = (g ?? -100) + p.hwy;
     if (p.pos.y <= restY && p.vel.y <= 0) {
       p.pos.y = restY; p.vel.y = 0;
-      p.vel.x *= (1 - 6 * dt); p.vel.z *= (1 - 6 * dt);
+      const fr = p.round ? 1.5 : 6; // 공은 잘 구르고 상자는 멈춤
+      p.vel.x *= (1 - fr * dt); p.vel.z *= (1 - fr * dt);
+      if (p.round) {
+        // 구름 결합: 미끄러짐 없이 구르게 각속도 맞춤
+        const k = Math.min(1, 8 * dt), r = p.half;
+        p.angVel.x += ((p.vel.z / r) - p.angVel.x) * k;
+        p.angVel.z += ((-p.vel.x / r) - p.angVel.z) * k;
+        p.angVel.y *= (1 - 4 * dt);
+      }
     }
     if (!held && p.pos.y < Config.killY) { // 떨어진 프롭 리스폰 (잡은 건 4m 자동해제로 처리)
       p.pos.set(-2.5, 2, 20); p.vel.set(0, 0, 0);
@@ -801,9 +845,9 @@ export class WorldSystem {
       else { p.pos.z = z1 + p.half; if (p.vel.z < 0) p.vel.z = 0; }
       return;
     }
-    if (p.pos.y - p.half >= top - 0.05 || p.pos.y + p.half <= bottom + 0.05) return;
-    const px0 = x0 - p.half, px1 = x1 + p.half;
-    const pz0 = z0 - p.half, pz1 = z1 + p.half;
+    if (p.pos.y - p.hwy >= top - 0.05 || p.pos.y + p.hwy <= bottom + 0.05) return;
+    const px0 = x0 - p.hwx, px1 = x1 + p.hwx;
+    const pz0 = z0 - p.hwz, pz1 = z1 + p.hwz;
     if (!(p.pos.x > px0 && p.pos.x < px1 && p.pos.z > pz0 && p.pos.z < pz1)) return;
     if (prev) {
       const wasOut =
@@ -841,8 +885,8 @@ export class WorldSystem {
     if (p.holds.some((h) => h.player === human)) return; // 내가 든 건 몸으로 밀어내지 않음
     if (human.pos.y > p.pos.y) return; // 위에 올라탄 건 밀어내지 않음 (밟기 허용)
     _v1.set(p.pos.x - human.pos.x, 0, p.pos.z - human.pos.z);
-    const d = _v1.length(), minD = p.half + Config.playerRadius;
-    const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
+    const d = _v1.length(), minD = Math.max(p.hwx, p.hwz) + Config.playerRadius;
+    const overlapY = (p.pos.y - p.hwy) < (human.pos.y + 1.5) && (p.pos.y + p.hwy) > human.pos.y;
     if (d >= minD || d <= 0.001 || !overlapY) return;
     _v1.normalize();
     // 질량 분할: 가벼우면 물체가 밀리고, 무거우면 몸이 밀려남 (몸 70kg 기준, 가중)
@@ -874,8 +918,8 @@ export class WorldSystem {
   #seizeCheck(p, human, net) {
     _v1.set(p.pos.x - human.pos.x, 0, p.pos.z - human.pos.z);
     const d = _v1.length();
-    const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
-    const touching = d < p.half + Config.playerRadius + 0.15 && overlapY;
+    const overlapY = (p.pos.y - p.hwy) < (human.pos.y + 1.5) && (p.pos.y + p.hwy) > human.pos.y;
+    const touching = d < Math.max(p.hwx, p.hwz) + Config.playerRadius + 0.15 && overlapY;
     if (touching && !p.touching && p.holds.length === 0 && !p.heldByOther && p.owner !== net.selfKey) {
       this.#takeOwnership(p);
       net.claimProp(p);
@@ -888,8 +932,8 @@ export class WorldSystem {
     for (const p of this.props) {
       if (!p.remote) continue;
       _v1.set(human.pos.x - p.pos.x, 0, human.pos.z - p.pos.z);
-      const d = _v1.length(), minD = p.half + Config.playerRadius;
-      const overlapY = (p.pos.y - p.half) < (human.pos.y + 1.5) && (p.pos.y + p.half) > human.pos.y;
+      const d = _v1.length(), minD = Math.max(p.hwx, p.hwz) + Config.playerRadius;
+      const overlapY = (p.pos.y - p.hwy) < (human.pos.y + 1.5) && (p.pos.y + p.hwy) > human.pos.y;
       if (d < minD && d > 0.001 && overlapY) {
         _v1.normalize();
         human.pos.addScaledVector(_v1, (minD - d) * 0.5);
@@ -898,7 +942,7 @@ export class WorldSystem {
   }
 
   #pushByRemote(r, p) {    _v1.set(p.pos.x - r.pos.x, 0, p.pos.z - r.pos.z);
-    const d = _v1.length(), minD = p.half + Config.playerRadius;
+    const d = _v1.length(), minD = Math.max(p.hwx, p.hwz) + Config.playerRadius;
     if (d < minD && d > 0.001) {
       _v1.normalize();
       p.pos.addScaledVector(_v1, (minD - d) * 4 * 0.016);
@@ -934,4 +978,9 @@ const _f = new THREE.Vector3();
 const _sweepPrev = new THREE.Vector3();
 const _prePush = new THREE.Vector3();
 const _rollAxis = new THREE.Vector3();
+const _m4 = new THREE.Matrix4();
+const _tv = new THREE.Vector3();
+const _torque = new THREE.Vector3();
+const _dq = new THREE.Quaternion();
+const _tq = new THREE.Quaternion();
 const _zero = new THREE.Vector3();
