@@ -559,10 +559,13 @@ export class WorldSystem {
           h.age = (h.age ?? 0) + dt;
           const grip = Math.min(1, h.age / 0.25); // 잡은 직후 0.25초간 서서히 (낚아채기 방지)
           h.player.desiredHand(h.side, _v1, pitch);
-          // 앵커 속도 (상대 감쇠용: 함께 움직이면 감쇠 없음)
+          // 앵커 속도 (상대 감쇠용: 함께 움직이면 감쇠 없음).
+          // 물리적으로 불가능한 속도(텔레포트/시점 스냅)는 클램프 — 아니면 든 물체가 날아감.
           let avx = 0, avy = 0, avz = 0;
           if (h.ax !== undefined) {
             avx = (_v1.x - h.ax) / dt; avy = (_v1.y - h.ay) / dt; avz = (_v1.z - h.az) / dt;
+            const as = Math.hypot(avx, avy, avz);
+            if (as > 12) { avx *= 12 / as; avy *= 12 / as; avz *= 12 / as; }
           }
           h.ax = _v1.x; h.ay = _v1.y; h.az = _v1.z;
           h.avx = avx; h.avy = avy; h.avz = avz;
@@ -629,7 +632,7 @@ export class WorldSystem {
         for (const r of net.remotes()) this.#pushByRemote(r, p);
         // 벽 + 바닥 (서브스텝 적분 포함)
         this.#stepProp(p, dt);
-        this.#stepAngular(p, dt, p.round ? 0.8 : 2.0);
+        this.#stepAngular(p, dt, p.round ? 0.8 : 3.5);
         this.#groundProp(p, dt, false);
       }
     }
@@ -895,10 +898,17 @@ export class WorldSystem {
     const push = (minD - d) * 8;
     const relVx = human.vel.x - p.vel.x, relVz = human.vel.z - p.vel.z;
     const approach = Math.max(0, relVx * _v1.x + relVz * _v1.z);
-    const kick = Math.min(approach * 0.25, 1.8) * (pm / (pm + m));
+    const kick = Math.min(approach * 0.18, 1.4) * (pm / (pm + m));
     _prePush.copy(p.pos);
     p.pos.addScaledVector(_v1, push * 0.016 * (pm / (pm + m)));
     p.vel.addScaledVector(_v1, kick);
+    // 높이 차로 밀면 넘어짐 (위에서 밀수록 잘 넘어감)
+    const ry = (human.pos.y + 1.0) - p.pos.y;
+    if (ry > 0.15 && kick > 0.01) {
+      const tq = kick * m * ry * 0.12;
+      p.angVel.x += (_v1.z * tq) / p.inertia;
+      p.angVel.z += (-_v1.x * tq) / p.inertia;
+    }
     human.pos.addScaledVector(_v1, -push * 0.016 * (m / (pm + m)));
     // 물체가 못 움직였으면(벽에 낌) 몸이 밀려남 — 끼인 물체는 고체
     this.collideProp(p, _prePush);
