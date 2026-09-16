@@ -425,9 +425,9 @@ export class WorldSystem {
     const g = hit?.top ?? null;
     const wasAbove = prevY === null || prevY >= (g ?? 0) - 0.15 || !hit?.isProp;
     if (g !== null && pos.y <= g + 0.02 && vel.y <= 0.01 && wasAbove) {
-      // 완만한 오르막은 스르륵 (순간이동 대신)
+      // 완만한 오르막은 스르륵 (순간이동 대신). 단, 거의 닿았으면 정확히 (가라앉음 방지).
       const rise = g - pos.y;
-      if (rise > 0 && rise < 0.4 && vel.y > -3) pos.y += rise * Math.min(1, 15 * dt);
+      if (rise > 0.15 && rise < 0.4 && vel.y > -3) pos.y += rise * Math.min(1, 15 * dt);
       else pos.y = g;
       vel.y = 0; grounded = true;
     } else if (g !== null && pos.y < g && wasAbove) {
@@ -778,6 +778,9 @@ export class WorldSystem {
   // 각속도 적분 + 감쇠 + 회전 AABB 갱신
   #stepAngular(p, dt, angDamp) {
     p.angVel.multiplyScalar(Math.max(0, 1 - angDamp * dt));
+    // 스핀 상한 (빙글빙글 방지): 상자 8, 공 30
+    const cap = p.round ? 30 : 8;
+    if (p.angVel.lengthSq() > cap * cap) p.angVel.setLength(cap);
     const w = p.angVel.length();
     if (w > 0.001) {
       _tv.set(p.angVel.x / w, p.angVel.y / w, p.angVel.z / w);
